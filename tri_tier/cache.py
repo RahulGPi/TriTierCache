@@ -47,3 +47,21 @@ class TriTierCache():
         #Global Attention Score 
         self.Global_Attn_Scr = torch.zeros((max_seq_len), dtype= torch.float32, device= DEVICE)
         self.Total_Processed_Tokens = 0
+
+    def accumultae_attn_scrs(self, attn_weights : torch.Tensor) -> None:
+        """
+        Squeeze attn weights and avg acroos heads
+        then add to global attn score
+        """
+
+        if attn_weights.dim() == 4:
+            step_scores = attn_weights.squeeze(0).squeeze(1)
+        elif attn_weights.dim() == 3:
+            step_scores = attn_weights.squeeze(1)
+        else:
+            step_scores = attn_weights
+
+        curren_seq_len = step_scores.shape[-1]
+        mean_head_scores = torch.mean(step_scores, dim=0)
+
+        self.Global_Attn_Scr[:curren_seq_len].add_(mean_head_scores)
