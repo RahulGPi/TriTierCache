@@ -48,7 +48,7 @@ class TriTierCache():
         self.Global_Attn_Scr = torch.zeros((max_seq_len), dtype= torch.float32, device= DEVICE)
         self.Total_Processed_Tokens = 0
 
-    def accumultae_attn_scrs(self, attn_weights : torch.Tensor) -> None:
+    def accumulate_attn_scrs(self, attn_weights : torch.Tensor) -> None:
         """
         Squeeze attn weights and avg acroos heads
         then add to global attn score
