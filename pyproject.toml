@@ -1,0 +1,20 @@
+[project]
+name = "idk-what-to-name-this"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "RahulGPi", email = "rahulgpai99@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "ninja>=1.13.0",
+    "psutil>=7.2.2",
+    "pybind11>=3.1.0",
+    "torch>=2.13.0",
+    "transformers>=5.16.1",
+]
+
+[project.scripts]
+idk-what-to-name-this = "idk_what_to_name_this:main"
+
