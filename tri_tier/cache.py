@@ -70,7 +70,7 @@ class TriTierCache():
 
         self.Global_Attn_Scr[:curren_seq_len].add_(mean_head_scores)
 
-    def ingest_token(self, new_k, new_v, token_id) -> None:
+    def ingest_token(self, new_k, new_v) -> None:
         """
         Filling the Tier 1- Recent Window
         if current rw count is less than window size(R_size)
@@ -95,6 +95,9 @@ class TriTierCache():
 
             self.RW_head_index = (self.RW_head_index + 1) % self.R_size
 
-            #route_evicted_token(evicted_k, evicted_v, evicted_token_id)
+            self.route_evicted_token(evicted_k, evicted_v, evicted_token_id)
 
         self.Total_Processed_Tokens += 1
+
+    def route_evicted_token(self, evicted_k, evicted_v, evicted_token_id):
+        ...
