@@ -14,6 +14,9 @@ class TriTierCache():
         H_ratio -> Heavy Hitter Percentile
         """
         
+
+        self.R_size = R_size
+
         self.max_heavy_hitters = math.ceil(max_seq_len * H_ratio)
         self.max_background_tokens = max_seq_len - R_size - self.max_heavy_hitters
 
@@ -32,6 +35,7 @@ class TriTierCache():
 
         #Packed 2bit storage
         #K quant through channels, V through per-token
+        #[max_background_tokens, num_heads, head_dim]
         self.quant_head_dim = math.ceil(head_dim/16)
         self.PBS_K_Packed = torch.empty((self.max_background_tokens, num_heads, self.quant_head_dim), dtype=torch.int32, device= DEVICE)
         self.PBS_K_Scales = torch.empty((self.max_background_tokens, num_heads, head_dim), dtype=torch.float32, device= DEVICE)
@@ -65,3 +69,32 @@ class TriTierCache():
         mean_head_scores = torch.mean(step_scores, dim=0)
 
         self.Global_Attn_Scr[:curren_seq_len].add_(mean_head_scores)
+
+    def ingest_token(self, new_k, new_v, token_id) -> None:
+        """
+        Filling the Tier 1- Recent Window
+        if current rw count is less than window size(R_size)
+        fills else
+        overwrites 
+        and routes to either t2 or t3
+        """
+
+        if self.RW_count < self.R_size:
+            self.RW_K_Buffer[self.RW_count] = new_k
+            self.RW_V_Buffer[self.RW_count] = new_v
+            self.RW_count += 1
+
+        else:
+            evicted_k = self.RW_K_Buffer[self.RW_head_index].clone()
+            evicted_v = self.RW_V_Buffer[self.RW_head_index].clone()
+
+            evicted_token_id = self.Total_Processed_Tokens - self.R_size
+
+            self.RW_K_Buffer[self.RW_head_index] = new_k
+            self.RW_V_Buffer[self.RW_head_index] = new_v
+
+            self.RW_head_index = (self.RW_head_index + 1) % self.R_size
+
+            #route_evicted_token(evicted_k, evicted_v, evicted_token_id)
+
+        self.Total_Processed_Tokens += 1
