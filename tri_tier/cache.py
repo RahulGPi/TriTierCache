@@ -100,4 +100,52 @@ class TriTierCache():
         self.Total_Processed_Tokens += 1
 
     def route_evicted_token(self, evicted_k, evicted_v, evicted_token_id):
-        ...
+        """
+        Check if heavy hitter
+        else compress nd store in PBS
+        """
+        
+        score = self.Global_Attn_Scr[evicted_token_id]
+
+        threshold = torch.quantile(self.Global_Attn_Scr, 0.95)
+
+        #Checking Heavy Hitter
+        if score >= threshold:
+            
+            #if heavy hitter has empty positions
+            if self.HH_count < self.max_heavy_hitters:
+                self.HH_K_Buffer[self.HH_count] = evicted_k
+                self.HH_V_Buffer[self.HH_count] = evicted_v
+                self.HH_scores[self.HH_count] = score
+                self.HH_token_ids[self.HH_count] = evicted_token_id
+                self.HH_count += 1
+
+            #HH is not full, 
+            #Find lowest value and check if to replace it in HH
+            else:
+                
+                min_index = torch.argmin(self.HH_scores)
+
+                if score > self.HH_scores[min_index]:
+
+                    removed_k = self.HH_K_Buffer[min_index]
+                    removed_v = self.HH_V_Buffer[min_index]
+                    removed_id = self.HH_token_ids[min_index]
+
+                    #TODO : compress_and_store()
+                    self.compress_and_store(removed_k, removed_v, removed_id)
+
+                    self.HH_K_Buffer[min_index] = evicted_k
+                    self.HH_V_Buffer[min_index] = evicted_v
+                    self.HH_scores[min_index] = score
+                    self.HH_token_ids[min_index] = evicted_token_id
+                
+                #New token not in 5% 
+                else:
+                    self.compress_and_store(evicted_k, evicted_v, evicted_token_id)
+        
+        #New token not good
+        else:
+            self.compress_and_store(evicted_k, evicted_v, evicted_token_id)
+
+            
