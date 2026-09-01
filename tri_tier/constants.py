@@ -1,1 +1,3 @@
 DEVICE = "cpu"
+
+UPDATE_THRESHOLD = 32

@@ -4,7 +4,7 @@ import math
 
 #TODO: cpp handlers
 
-from tri_tier.constants import DEVICE
+from tri_tier.constants import DEVICE, UPDATE_THRESHOLD
 
 class TriTierCache():
     def __init__(self, max_seq_len, head_dim, num_heads, R_size, H_ratio):
@@ -16,6 +16,8 @@ class TriTierCache():
         
 
         self.R_size = R_size
+
+        self.current_threshold = 0.0
 
         self.max_heavy_hitters = math.ceil(max_seq_len * H_ratio)
         self.max_background_tokens = max_seq_len - R_size - self.max_heavy_hitters
@@ -99,6 +101,19 @@ class TriTierCache():
 
         self.Total_Processed_Tokens += 1
 
+    def fetch_or_calc_thresh(self, evicted_token_id):
+        """
+        As the preallocated space is 0, slice and find the ones till updated threshold
+        """
+
+        if (evicted_token_id % UPDATE_THRESHOLD == 0) or self.current_threshold == 0.0:
+
+            active_scores = self.Global_Attn_Scr[0: self.Total_Processed_Tokens]
+
+            self.current_threshold = torch.quantile(active_scores, 0.95)
+
+        return self.current_threshold    
+    
     def route_evicted_token(self, evicted_k, evicted_v, evicted_token_id):
         """
         Check if heavy hitter
@@ -107,7 +122,7 @@ class TriTierCache():
         
         score = self.Global_Attn_Scr[evicted_token_id]
 
-        threshold = torch.quantile(self.Global_Attn_Scr, 0.95)
+        threshold = self.fetch_or_calc_thresh(evicted_token_id=evicted_token_id)
 
         #Checking Heavy Hitter
         if score >= threshold:
