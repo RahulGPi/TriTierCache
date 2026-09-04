@@ -151,9 +151,9 @@ class TriTierCache():
 
                 if score > self.HH_scores[min_index]:
 
-                    removed_k = self.HH_K_Buffer[min_index]
-                    removed_v = self.HH_V_Buffer[min_index]
-                    removed_id = self.HH_token_ids[min_index]
+                    removed_k = self.HH_K_Buffer[min_index].clone()
+                    removed_v = self.HH_V_Buffer[min_index].clone()
+                    removed_id = self.HH_token_ids[min_index].clone()
 
                     #TODO : compress_and_store()
                     self.compress_and_store(removed_k, removed_v, removed_id)
