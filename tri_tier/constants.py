@@ -1,3 +1,5 @@
 DEVICE = "cpu"
 
 UPDATE_THRESHOLD = 32
+
+CHUNK_SIZE = 16
