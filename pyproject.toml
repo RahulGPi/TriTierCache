@@ -23,3 +23,8 @@ dependencies = [
 [project.scripts]
 idk-what-to-name-this = "idk_what_to_name_this:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
