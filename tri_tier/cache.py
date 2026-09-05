@@ -16,7 +16,7 @@ class TriTierCache():
         
 
         self.R_size = R_size
-
+        self.num_heads = num_heads
         self.current_threshold = 0.0
 
         self.max_heavy_hitters = math.ceil(max_seq_len * H_ratio)
@@ -172,3 +172,60 @@ class TriTierCache():
             self.compress_and_store(evicted_k, evicted_v, evicted_token_id)
 
             
+
+    def compress_and_store(self, removed_k, removed_v, removed_token_id):
+        """
+        puts in waiting room, 
+        checks if WR is full
+        if is quantises keys per channel, and values by token
+        then puts in PBS storage in 2bit values
+        """
+
+
+        #Put in the waiting room
+        self.WR_K_Buffer[self.WR_count] = removed_k
+        self.WR_V_Buffer[self.WR_count] = removed_v
+        self.WR_token_ids[self.WR_count] = removed_token_id
+        self.WR_count += 1
+
+        #check if waiting room is full to be pushed into PBS
+        if self.WR_count < CHUNK_SIZE:
+            return
+        
+        #quantise keys per channel, across the WR
+        K_Min = torch.amin(self.WR_K_Buffer, dim=0, keepdim=True)
+        K_Max = torch.amax(self.WR_K_Buffer, dim = 0, keepdim= True)
+        K_Scale = torch.clamp_min((K_Max - K_Min) / 3.0, min=1e-9)
+        K_Quant = torch.clamp(torch.round((self.WR_K_Buffer - K_Min) / K_Scale), 0, 3).to(dtype=torch.int32)
+
+        #quantise values per token, across head dim
+        V_Min = torch.amin(self.WR_V_Buffer, dim=-1, keepdim=True)
+        V_Max = torch.amax(self.WR_V_Buffer, dim = -1, keepdim= True)
+        V_Scale = torch.clamp_min((V_Max - V_Min) / 3.0, min=1e-9)
+        V_Quant = torch.clamp(torch.round((self.WR_V_Buffer - V_Min) / V_Scale), 0, 3).to(dtype=torch.int32)
+
+        #bit packing 16 tokens -> 1 int 32, per-channel
+        K_shifts = torch.arange(0, 32, 2, dtype=torch.int32).reshape(16, 1, 1)
+        K_Shifted = torch.bitwise_left_shift(K_Quant, K_shifts)
+        Packed_K  = torch.sum(K_Shifted, dim=0, dtype=torch.int32)
+
+        #bit packing 16 channels -> 1 int 32, per token
+        V_Grouped = V_Quant.reshape(CHUNK_SIZE, self.num_heads, self.quant_head_dim, 16)
+        V_shifts = torch.arange(0, 32, 2, dtype=torch.int32).reshape(1, 1, 1, 16)
+        Packed_V = torch.sum(torch.bitwise_left_shift(V_Grouped, V_shifts), dim=-1, dtype=torch.int32)
+
+        #Write into storage
+
+        block_idx = self.PBS_count // CHUNK_SIZE
+
+        self.PBS_K_Packed[block_idx] = Packed_K
+        self.PBS_K_Scales[block_idx] = K_Scale.squeeze(0)
+        self.PBS_K_Zeroes[block_idx] = K_Min.squeeze(0)
+
+        self.PBS_V_Packed[self.PBS_count : self.PBS_count + CHUNK_SIZE] = Packed_V
+        self.PBS_V_Scales[self.PBS_count : self.PBS_count + CHUNK_SIZE] = V_Scale
+        self.PBS_V_Zeroes[self.PBS_count : self.PBS_count + CHUNK_SIZE] = V_Min
+        self.PBS_token_ids[self.PBS_count : self.PBS_count + CHUNK_SIZE] = self.WR_token_ids.clone()
+
+        self.PBS_count += CHUNK_SIZE
+        self.WR_count = 0
