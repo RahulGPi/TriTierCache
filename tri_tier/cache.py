@@ -4,7 +4,11 @@ import math
 
 #TODO: cpp handlers
 
-from tri_tier.constants import DEVICE, UPDATE_THRESHOLD, CHUNK_SIZE
+from tri_tier.constants import (
+    DEVICE, 
+    UPDATE_THRESHOLD,
+    CHUNK_SIZE,
+    SINK_SIZE)
 
 class TriTierCache():
     def __init__(self, max_seq_len, head_dim, num_heads, R_size, H_ratio):
@@ -41,6 +45,11 @@ class TriTierCache():
         self.WR_token_ids = torch.full((CHUNK_SIZE,), -1, dtype=torch.int64, device=DEVICE)
         self.WR_count = 0
 
+        #Attention sink for unbounded conversation length
+        #[Sink size, num heads, head_dim]
+        self.S_K_Buffer = torch.empty((SINK_SIZE, num_heads, head_dim), dtype=torch.float32)
+        self.S_V_Buffer = torch.empty((SINK_SIZE, num_heads, head_dim), dtype=torch.float32)
+        self.S_count = 0
 
         #Packed 2bit storage
         #K quant through channels, V through per-token
@@ -51,11 +60,13 @@ class TriTierCache():
         self.PBS_K_Scales = torch.empty((self.num_blocks, num_heads, head_dim), dtype=torch.float32, device= DEVICE)
         self.PBS_K_Zeroes = torch.empty((self.num_blocks, num_heads, head_dim), dtype=torch.float32, device= DEVICE)
 
-        self.PBS_V_Packed = torch.empty((self.max_background_tokens, num_heads, self.quant_head_dim), dtype=torch.int32, device= DEVICE)
-        self.PBS_V_Scales = torch.empty((self.max_background_tokens, num_heads, 1), dtype=torch.float32, device= DEVICE)
-        self.PBS_V_Zeroes = torch.empty((self.max_background_tokens, num_heads, 1), dtype=torch.float32, device= DEVICE)
+        self.PBS_V_Packed = torch.empty((self.num_blocks * CHUNK_SIZE, num_heads, self.quant_head_dim), dtype=torch.int32, device= DEVICE)
+        self.PBS_V_Scales = torch.empty((self.num_blocks * CHUNK_SIZE, num_heads, 1), dtype=torch.float32, device= DEVICE)
+        self.PBS_V_Zeroes = torch.empty((self.num_blocks * CHUNK_SIZE, num_heads, 1), dtype=torch.float32, device= DEVICE)
         
-        self.PBS_token_ids = torch.full((self.max_background_tokens,), -1, dtype=torch.int64, device= DEVICE)
+        self.PBS_token_ids = torch.full((self.num_blocks * CHUNK_SIZE,), -1, dtype=torch.int64, device= DEVICE)
+        self.PBS_is_full = False
+        self.PBS_block_head_index = 0
         self.PBS_count = 0
 
         #Global Attention Score 
@@ -88,8 +99,12 @@ class TriTierCache():
         overwrites 
         and routes to either t2 or t3
         """
+        if self.S_count < SINK_SIZE:
+            self.S_K_Buffer[self.S_count] = new_k
+            self.S_V_Buffer[self.S_count] = new_v
+            self.S_count += 1 
 
-        if self.RW_count < self.R_size:
+        elif self.RW_count < self.R_size:
             self.RW_K_Buffer[self.RW_count] = new_k
             self.RW_V_Buffer[self.RW_count] = new_v
             self.RW_count += 1
@@ -215,17 +230,29 @@ class TriTierCache():
         Packed_V = torch.sum(torch.bitwise_left_shift(V_Grouped, V_shifts), dim=-1, dtype=torch.int32)
 
         #Write into storage
+        if not self.PBS_is_full:
+            block_idx = self.PBS_count // CHUNK_SIZE
 
-        block_idx = self.PBS_count // CHUNK_SIZE
+        else:
+            block_idx = self.PBS_block_head_index
+            self.PBS_block_head_index = (self.PBS_block_head_index + 1) % self.num_blocks
+
+        token_offset = block_idx * CHUNK_SIZE
+        
 
         self.PBS_K_Packed[block_idx] = Packed_K
         self.PBS_K_Scales[block_idx] = K_Scale.squeeze(0)
         self.PBS_K_Zeroes[block_idx] = K_Min.squeeze(0)
 
-        self.PBS_V_Packed[self.PBS_count : self.PBS_count + CHUNK_SIZE] = Packed_V
-        self.PBS_V_Scales[self.PBS_count : self.PBS_count + CHUNK_SIZE] = V_Scale
-        self.PBS_V_Zeroes[self.PBS_count : self.PBS_count + CHUNK_SIZE] = V_Min
-        self.PBS_token_ids[self.PBS_count : self.PBS_count + CHUNK_SIZE] = self.WR_token_ids.clone()
+        self.PBS_V_Packed[token_offset : token_offset + CHUNK_SIZE] = Packed_V
+        self.PBS_V_Scales[token_offset : token_offset + CHUNK_SIZE] = V_Scale
+        self.PBS_V_Zeroes[token_offset : token_offset + CHUNK_SIZE] = V_Min
+        self.PBS_token_ids[token_offset : token_offset + CHUNK_SIZE] = self.WR_token_ids.clone()
 
-        self.PBS_count += CHUNK_SIZE
+        if not self.PBS_is_full:
+            self.PBS_count += CHUNK_SIZE
+            if self.PBS_count >= self.max_background_tokens:
+                self.PBS_is_full = True
+
+
         self.WR_count = 0
