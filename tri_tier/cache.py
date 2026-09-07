@@ -21,6 +21,7 @@ class TriTierCache():
 
         self.R_size = R_size
         self.num_heads = num_heads
+        self.head_dim = head_dim
         self.current_threshold = 0.0
 
         self.max_heavy_hitters = math.ceil(max_seq_len * H_ratio)
@@ -47,8 +48,8 @@ class TriTierCache():
 
         #Attention sink for unbounded conversation length
         #[Sink size, num heads, head_dim]
-        self.S_K_Buffer = torch.empty((SINK_SIZE, num_heads, head_dim), dtype=torch.float32)
-        self.S_V_Buffer = torch.empty((SINK_SIZE, num_heads, head_dim), dtype=torch.float32)
+        self.S_K_Buffer = torch.empty((SINK_SIZE, num_heads, head_dim), dtype=torch.float32, device= DEVICE)
+        self.S_V_Buffer = torch.empty((SINK_SIZE, num_heads, head_dim), dtype=torch.float32, device=DEVICE)
         self.S_count = 0
 
         #Packed 2bit storage
@@ -73,7 +74,7 @@ class TriTierCache():
         self.Global_Attn_Scr = torch.zeros((max_seq_len), dtype= torch.float32, device= DEVICE)
         self.Total_Processed_Tokens = 0
 
-    def accumulate_attn_scrs(self, attn_weights : torch.Tensor) -> None:
+    def accumulate_attn_scrs(self, attn_weights : torch.Tensor, full_ids) -> None:
         """
         Squeeze attn weights and avg acroos heads
         then add to global attn score
@@ -86,10 +87,10 @@ class TriTierCache():
         else:
             step_scores = attn_weights
 
-        curren_seq_len = step_scores.shape[-1]
+        # curren_seq_len = step_scores.shape[-1]
         mean_head_scores = torch.mean(step_scores, dim=0)
 
-        self.Global_Attn_Scr[:curren_seq_len].add_(mean_head_scores)
+        self.Global_Attn_Scr.index_add_(0, full_ids, mean_head_scores)
 
     def ingest_token(self, new_k, new_v) -> None:
         """
@@ -256,3 +257,60 @@ class TriTierCache():
 
 
         self.WR_count = 0
+
+    def reconstruct_full_cache(self):
+
+
+        Sink_K = self.S_K_Buffer[0 : self.S_count]
+        Sink_V = self.S_V_Buffer[0 : self.S_count]
+        Sinks_ids = torch.arange(0, self.S_count)
+
+        #dequantise keys from pbs per channel
+        K_Shifts = torch.arange(0, 32 , 2, dtype=torch.int32, device=DEVICE).reshape(16, 1, 1, 1)
+        K_Unpacked = torch.bitwise_and(torch.bitwise_right_shift(self.PBS_K_Packed.unsqueeze(0), K_Shifts), 0b11)
+        K_Unpacked = K_Unpacked.permute(1, 0, 2, 3).reshape(self.num_blocks * CHUNK_SIZE, self.num_heads, self.head_dim)
+
+        K_Scale_Expanded = self.PBS_K_Scales.repeat_interleave(CHUNK_SIZE, dim=0)
+        K_Zero_Expanded = self.PBS_K_Zeroes.repeat_interleave(CHUNK_SIZE, dim= 0)
+        Tier3_K = K_Unpacked.float() * K_Scale_Expanded + K_Zero_Expanded
+
+        #Dequantise values from pbs per token
+        V_Shifts = torch.arange(0, 32 , 2, dtype=torch.int32, device=DEVICE)
+        V_Unpacked = torch.bitwise_and(torch.bitwise_right_shift(self.PBS_V_Packed.unsqueeze(-1), V_Shifts), 0b11)
+        V_Unpacked = V_Unpacked.reshape(self.num_blocks * CHUNK_SIZE, self.num_heads, self.head_dim)
+        Tier3_V = V_Unpacked.float() * self.PBS_V_Scales + self.PBS_V_Zeroes
+
+        #drop empty padding slots
+        valid_mask = (self.PBS_token_ids != -1)
+        Tier3_K, Tier3_V, Tier3_token_ids = Tier3_K[valid_mask], Tier3_V[valid_mask], self.PBS_token_ids[valid_mask]
+
+        HH_K_Buf = self.HH_K_Buffer[0 : self.HH_count]
+        HH_V_Buf = self.HH_V_Buffer[0 : self.HH_count]
+        HH_ids = self.HH_token_ids[0 : self.HH_count]
+
+        #merging HH and PBS
+        Middle_K = torch.cat([HH_K_Buf, Tier3_K], dim=0)
+        Middle_V = torch.cat([HH_V_Buf, Tier3_V], dim=0)
+        Middle_ids= torch.cat([HH_ids, Tier3_token_ids], dim=0)
+
+        Sort_Perm = torch.argsort(Middle_ids)
+        Middle_K = Middle_K[Sort_Perm]
+        Middle_V = Middle_V[Sort_Perm]
+        Middle_ids = Middle_ids[Sort_Perm]
+
+        if self.RW_count < self.R_size:
+            RW_K_Buff = self.RW_K_Buffer[0 : self.RW_count]
+            RW_V_Buff = self.RW_V_Buffer[0 : self.RW_count]
+            RW_ids = torch.arange(self.S_count, self.S_count + self.RW_count)
+
+        else:
+            RW_K_Buff = torch.roll(self.RW_K_Buffer, shifts=self.RW_head_index, dims=0)
+            RW_V_Buff = torch.roll(self.RW_V_Buffer, shifts=self.RW_head_index, dims=0)
+            RW_ids = torch.arange(self.Total_Processed_Tokens - self.R_size, self.Total_Processed_Tokens)
+
+
+        K_Full = torch.cat([Sink_K, Middle_K, RW_K_Buff], dim=0)
+        V_Full = torch.cat([Sink_V, Middle_V, RW_V_Buff], dim=0)
+        Full_ids = torch.cat([Sinks_ids, Middle_ids, RW_ids], dim=0)
+
+        return K_Full, V_Full, Full_ids
