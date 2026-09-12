@@ -4,10 +4,64 @@ __pycache__/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.pytest_cache/
 
 # Virtual environments
-.venv
+.venv/
+env/
+venv/
 
-#Test Dir
-# tests/
+# C / C++ Compiled Objects & Libraries
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.pyd
+
+# C / C++ Executables & Compiled Test Binaries (Root & Subdirectories)
+*.out
+*.exe
+*.app
+/test_*
+test_quantize_*
+test_quantise_*
+test_dequant_*
+test_*_avx2
+test_*_vnni
+
+# Never ignore C/C++ or Python source files
+!*.cpp
+!*.hpp
+!*.h
+!*.c
+!*.cc
+!*.cu
+!*.cuh
+!*.py
+
+# Build Tools & Ninja / CMake
+.ninja_deps
+.ninja_log
+ninja/
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+
+# Debugging / Profiling
+*.dSYM/
+core
+*.core
+*.gcov
+*.gcda
+*.gcno
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
