@@ -304,8 +304,8 @@ class TriTierCache():
             RW_ids = torch.arange(self.S_count, self.S_count + self.RW_count)
 
         else:
-            RW_K_Buff = torch.roll(self.RW_K_Buffer, shifts=self.RW_head_index, dims=0)
-            RW_V_Buff = torch.roll(self.RW_V_Buffer, shifts=self.RW_head_index, dims=0)
+            RW_K_Buff = torch.roll(self.RW_K_Buffer, shifts=-self.RW_head_index, dims=0)
+            RW_V_Buff = torch.roll(self.RW_V_Buffer, shifts=-self.RW_head_index, dims=0)
             RW_ids = torch.arange(self.Total_Processed_Tokens - self.R_size, self.Total_Processed_Tokens)
 
 
