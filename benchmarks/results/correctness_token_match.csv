@@ -1,0 +1,4 @@
+prompt_length,generated_tokens,matching_tokens,match_percentage,first_divergence_step
+16,25,19,76.0,16
+64,25,24,96.0,11
+128,25,8,32.0,9

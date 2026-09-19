@@ -172,5 +172,19 @@ def patched_forward(self,
     return final_output, attn_weights
 
 
+_ORIGINAL_FORWARD = LlamaAttention.forward
+
+
 def apply_patch():
     LlamaAttention.forward = patched_forward
+
+
+def remove_patch():
+    LlamaAttention.forward = _ORIGINAL_FORWARD
+
+
+def reset_caches(model):
+    """Resets any lazily created TriTierCache instances on the model layers."""
+    for module in model.modules():
+        if hasattr(module, "tri_tier_cache"):
+            delattr(module, "tri_tier_cache")

@@ -1,0 +1,11 @@
+category,metric,value
+Correctness,Avg Greedy Token Match (%),68.00%
+Correctness,Avg Logit Cosine Similarity,0.986318
+Quality,Vanilla Baseline PPL,34855.2344
+Quality,TriTierCache PPL,34901.1650
+Quality,PPL Difference (%),+0.13%
+Latency,Mean Vanilla Decode Latency,6.79 ms/token
+Latency,Mean TriTier Decode Latency,21.62 ms/token
+Latency,AVX2 Fused Kernel Decode Latency,1054.04 µs/step
+Compression,"Compression Ratio @ 3,200 tokens (vs FP32)",4.04x
+Compression,"Compression Ratio @ 32,768 tokens (vs FP32)",5.43x

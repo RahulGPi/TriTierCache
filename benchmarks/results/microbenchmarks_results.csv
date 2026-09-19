@@ -1,0 +1,2 @@
+kernel_name,total_active_tokens,num_q_heads,num_kv_heads,head_dim,mean_latency_us,ops_per_sec
+fused_attention_decode_avx2,580,32,8,128,1054.0373110000019,948.7330188067681

@@ -1,0 +1,2 @@
+model,prompt,prompt_tokens,generated_tokens,matching_tokens,match_percentage,first_divergence_step,vanilla_avg_latency_ms,tritier_avg_latency_ms
+meta-llama/Llama-3.2-1B,The quick brown fox jumps over the lazy dog and,10,20,16,80.0,14,4.79605029997856,16.99964974998238
