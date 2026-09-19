@@ -11,7 +11,8 @@ ext = Extension(
         "csrc/cpu/fused_attn_avx2.cpp",
     ],
     include_dirs=[pybind11.get_include(), "csrc/cpu", "csrc/include", "csrc"],
-    extra_compile_args=["-O3", "-mavx2", "-mbmi2", "-mfma", "-std=c++17"],
+    extra_compile_args=["-O3", "-mavx2", "-mbmi2", "-mfma", "-std=c++17", "-fopenmp"],
+    extra_link_args=["-fopenmp"],
     language="c++",
 )
 
