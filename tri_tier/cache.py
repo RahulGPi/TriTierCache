@@ -74,12 +74,11 @@ class TriTierCache():
         self.Global_Attn_Scr = torch.zeros((max_seq_len), dtype= torch.float32, device= DEVICE)
         self.Total_Processed_Tokens = 0
 
-    def accumulate_attn_scrs(self, attn_weights : torch.Tensor, full_ids) -> None:
+    def accumulate_attn_scrs(self, attn_weights: torch.Tensor, full_ids=None) -> None:
         """
-        Squeeze attn weights and avg acroos heads
+        Squeeze attn weights and avg across heads
         then add to global attn score
         """
-
         if attn_weights.dim() == 4:
             step_scores = attn_weights.squeeze(0).squeeze(1)
         elif attn_weights.dim() == 3:
@@ -87,10 +86,13 @@ class TriTierCache():
         else:
             step_scores = attn_weights
 
-        # curren_seq_len = step_scores.shape[-1]
         mean_head_scores = torch.mean(step_scores, dim=0)
 
-        self.Global_Attn_Scr.index_add_(0, full_ids, mean_head_scores)
+        if full_ids is None:
+            kv_len = mean_head_scores.shape[-1]
+            self.Global_Attn_Scr[:kv_len].add_(mean_head_scores)
+        else:
+            self.Global_Attn_Scr.index_add_(0, full_ids, mean_head_scores)
 
     def ingest_token(self, new_k, new_v) -> None:
         """
