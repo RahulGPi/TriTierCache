@@ -3,192 +3,168 @@
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![Transformers](https://img.shields.io/badge/Transformers-HuggingFace-yellow.svg)](https://github.com/huggingface/transformers)
-[![Architecture](https://img.shields.io/badge/Hardware%20Target-Intel%2012th%20Gen%20Alder%20Lake-0071C5.svg)](https://www.intel.com/)
+[![Acceleration](https://img.shields.io/badge/SIMD-AVX2%20%7C%20FMA%20%7C%20OpenMP-0071C5.svg)](https://www.intel.com/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-An optimized, multi-tier Key-Value (KV) cache architecture designed specifically for long-context autoregressive LLM inference on **Intel® 12th Gen "Alder Lake" Hybrid Architecture** (CPU + Integrated Xe-LP Iris Xe Graphics). **TriTierCache** drastically reduces KV cache memory footprint and bandwidth bottlenecks during long-sequence generation while maintaining generation accuracy and low latency.
+**TriTierCache** is a high-performance, hierarchical Key-Value (KV) cache architecture designed for long-context autoregressive Large Language Model (LLM) inference on modern x86_64 architectures (featuring AVX2, FMA, BMI2, and OpenMP multi-threading). 
 
----
-
-## Hardware Target: Intel® 12th Gen Alder Lake Architecture
-
-This project is tailored specifically for the **Intel Alder Lake microarchitecture**, mapping memory tiers and compute workloads directly onto the Alder Lake SoC hardware blocks.
-
-```text
-+---------------------------------------------------------------------------------------------------------+
-|                               INTEL® ALDER LAKE HYBRID SOC ARCHITECTURE                                 |
-+---------------------------------------------------------------------------------------------------------+
-|                                                                                                         |
-|  +-------------------------------------+   +------------------------------------+                       |
-|  |     Golden Cove (P-Cores)           |   |       Gracemont (E-Cores)          |                       |
-|  |     - High Single-Thread IPC        |   |       - High-Density Throughput    |                       |
-|  |     - AVX2 / FMA3 / AVX-VNNI        |   |       - AVX2 / AVX-VNNI            |                       |
-|  |     - Decode & Attention MatMul     |   |       - Async Chunking & Eviction  |                       |
-|  +------------------+------------------+   +-----------------+------------------+                       |
-|                     |                                        |                                          |
-|  ===================+========================================+================== Coherent Ring Bus     |
-|                     |                                        |                                          |
-|  +------------------+------------------+   +-----------------+------------------+                       |
-|  |   Shared Intel® Smart Cache (L3)    |   |   Intel® Xe-LP GT2 Graphics (iGPU) |                       |
-|  |   - Up to 30 MB LLC                 |   |   - 80–96 Execution Units (EUs)    |                       |
-|  |   - High-Bandwidth Ring Routing     |   |   - Native DP4A AI Acceleration    |                       |
-|  |   - Ring Buffer & Tier 1/2 Resident |   |   - INT8 / INT4 / INT2 Dot-Product |                       |
-|  +------------------+------------------+   +-----------------+------------------+                       |
-|                     |                                        |                                          |
-|  ===================+========================================+================== Memory Crossbar        |
-|                                        |                                                                |
-|                     +------------------+-------------------+                                            |
-|                     | Dual-Channel Unified Memory (UMA)    |                                            |
-|                     | - Shared DDR4 / DDR5 / LPDDR5        |                                            |
-|                     | - Zero-Copy Host <-> iGPU Access     |                                            |
-|                     +--------------------------------------+                                            |
-+---------------------------------------------------------------------------------------------------------+
-```
-
-### Alder Lake Hardware Subsystems & Workload Mapping
-
-1. **Golden Cove (Performance Cores / P-Cores)**
-   - **Role**: Executes high-priority, latency-sensitive decode steps, RoPE calculations, FP32 projection matmuls, and full-precision Tier 1/Tier 2 attention calculations.
-   - **Instruction Sets**: **AVX2**, **FMA3**, and **Intel® AVX-VNNI** (Vector Neural Network Instructions) for 256-bit SIMD matrix math and bit-manipulation (unpacking 2-bit values directly to FP32).
-
-2. **Gracemont (Efficient Cores / E-Cores)**
-   - **Role**: Offloads asynchronous background operations, including 16-token Waiting Room chunking, KIVI-style 2-bit quantization, and global attention score sorting/eviction routing without starving P-core compute threads.
-
-3. **Intel® Iris® Xe Graphics (Xe-LP GT2 iGPU)**
-   - **Role**: Accelerates batched dequantization and integer dot-products directly on the integrated GPU.
-   - **Compute Hardware**: Up to 96 Execution Units (EUs) / 768 ALUs with hardware **DP4A** (Dot Product 4-element Accumulate) instructions for high-throughput INT8/INT4/INT2 acceleration.
-   - **Programming Interfaces**: **Intel® oneAPI / SYCL**, **Level Zero**, and **Intel Extension for PyTorch (IPEX)**.
-
-4. **Zero-Copy Unified Memory Architecture (UMA)**
-   - The CPU and Xe-LP iGPU share the same physical memory space across the system bus. TriTierCache eliminates PCIe transfer bottlenecks when demoting/promoting tokens between Tier 1 (FP32), Tier 2 (FP32), and Tier 3 (2-bit packed).
-
----
-
-## Top 5 Alder Lake Hardware Configurations Using this Architecture
-
-The Intel 12th Gen Alder Lake series powers multiple form factors sharing this unified CPU + Xe-LP architecture. TriTierCache targets the following top 5 hardware platform tiers:
-
-| Tier / Platform | Representative SKUs | CPU Core Config | iGPU Specs (Xe-LP) | Target TDP | Primary Optimization Profile |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1. Alder Lake-H** *(Primary Reference)* | **Core™ i5-12500H**<br>Core™ i7-12700H<br>Core™ i9-12900H | Up to 14C / 20T<br>(6P + 8E or 4P + 8E) | **Iris® Xe GT2**<br>80–96 EUs (640–768 ALUs)<br>DP4A AI Accel. | **45W** (Base)<br>95W–115W (Boost) | Maximum P+E throughput with full 80/96 EU iGPU acceleration. |
-| **2. Alder Lake-P** | Core™ i7-1280P<br>Core™ i7-1260P<br>Core™ i5-1240P | Up to 14C / 20T<br>(6P + 8E or 4P + 8E) | **Iris® Xe GT2**<br>80–96 EUs (640–768 ALUs)<br>DP4A AI Accel. | **28W** (Base)<br>64W (Boost) | Performance thin-and-light laptop deployment with high EU density. |
-| **3. Alder Lake-U** | Core™ i7-1265U<br>Core™ i7-1255U<br>Core™ i5-1235U | Up to 10C / 12T<br>(2P + 8E) | **Iris® Xe GT2**<br>80–96 EUs (640–768 ALUs)<br>DP4A AI Accel. | **15W** (Base)<br>55W (Boost) | Ultrabook & handheld low-power inference using E-core chunking. |
-| **4. Alder Lake-S** | Core™ i9-12900K<br>Core™ i7-12700K<br>Core™ i5-12600K | Up to 16C / 24T<br>(8P + 8E) | **Intel® UHD 770**<br>32 EUs (256 ALUs)<br>Xe-LP Architecture | **65W–125W** (Base)<br>150W–241W (Boost) | Desktop platform with high P-core frequencies and up to 30 MB L3 cache. |
-| **5. Alder Lake-HX** | Core™ i9-12950HX<br>Core™ i7-12850HX<br>Core™ i5-12600HX | Up to 16C / 24T<br>(8P + 8E) | **Intel® UHD 770**<br>32 EUs (256 ALUs)<br>Xe-LP Architecture | **55W** (Base)<br>157W (Boost) | Enthusiast mobile workstation with 16-core desktop die packaging. |
+By combining **attention sinks**, **full-precision recent windows**, **importance-routed heavy hitters**, and **asymmetric 2-bit packed background storage** with a custom **C++ AVX2 fused attention engine**, TriTierCache reduces KV cache memory footprints by up to 4× while preserving generative perplexity and high decoding throughput.
 
 ---
 
 ## Architecture Overview
 
-Standard full-precision KV caches grow linearly with context length ($O(N)$), quickly exhausting memory bandwidth and LLC capacity during long auto-regressive generation. TriTierCache introduces a **three-tier hierarchical storage strategy with attention sinks**, categorizing tokens based on recency and cumulative attention importance.
+Standard full-precision KV caches grow linearly with sequence length ($O(N)$), rapidly bottlenecking memory bandwidth and cache capacity during long autoregressive generation. TriTierCache organizes KV storage into three distinct tiers plus attention sinks:
 
-![Tri-Tier KV Cache High-Level Architecture](tri_tier_cache_hld.svg)
+```text
++---------------------------------------------------------------------------------------------------------+
+|                                    TRITIERCACHE MEMORY HIERARCHY                                        |
++---------------------------------------------------------------------------------------------------------+
+|                                                                                                         |
+|  +---------------------------+   +---------------------------+   +-----------------------------------+  |
+|  |     Attention Sinks       |   |   Tier 1: Recent Window   |   |     Tier 2: Heavy Hitters (HH)    |  |
+|  |     (Initial 4 Tokens)    |   |     (Latest 256 Tokens)   |   |     (Top 5% Important Tokens)     |  |
+|  |     - FP32 Exact Storage  |   |     - FP32 Ring Buffer    |   |     - FP32 Dynamic Eviction       |  |
+|  |     - Softmax Stability   |   |     - Exact Local Context |   |     - Global Attention Scoring    |  |
+|  +-------------+-------------+   +-------------+-------------+   +-----------------+-----------------+  |
+|                |                               |                               |                        |
+|                +-------------------------------+-------------------------------+                        |
+|                                                |                                                        |
+|                                                v                                                        |
+|                              +-----------------------------------+                                      |
+|                              |   Tier 3: Background Storage      |                                      |
+|                              |   - 2-bit Asymmetric Quantization |                                      |
+|                              |   - K: Per-Channel Block Packing  |                                      |
+|                              |   - V: Per-Token Channel Packing  |                                      |
+|                              |   - 16-Token Packed Blocks (PBS)  |                                      |
+|                              +-----------------+-----------------+                                      |
+|                                                |                                                        |
++------------------------------------------------+--------------------------------------------------------+
+                                                 |
+                                                 v
+                       +---------------------------------------------------+
+                       |        C++ AVX2 / OpenMP Fused Attention          |
+                       |        - Multi-threaded Query Head Parallelism    |
+                       |        - Direct In-Kernel 2-Bit Dequantization    |
+                       |        - AVX2 Vectorized Dot-Products & AXPY      |
+                       |        - Grouped Query Attention (GQA) Support    |
+                       +---------------------------------------------------+
+```
 
-### The Storage Hierarchy
+### The Tier Storage Hierarchy
 
 | Tier / Buffer | Data Representation | Sizing & Allocation | Purpose & Policy |
 | :--- | :--- | :--- | :--- |
 | **Attention Sinks** | FP32 (Exact) | Fixed `SINK_SIZE = 4` | Retains initial sequence tokens to preserve attention distribution stability (StreamingLLM). |
 | **Tier 1: Recent Window (RW)** | FP32 (Exact) | Fixed `R_size` (e.g., 256 tokens) | Ring buffer storing latest tokens in full precision for exact local context. FIFO eviction. |
-| **Tier 2: Heavy Hitters (HH)** | FP32 (Exact) | Dynamic `H_ratio` (e.g., top 5% of `max_seq_len`) | Stores the most critical historical tokens with the highest cumulative attention scores. Dynamically demoted when stronger tokens arrive. |
-| **Tier 3: Background Storage (PBS)** | 2-bit Quantized (Packed `int32`) | Remaining token capacity (`max_background_tokens`) | KIVI-style asymmetric 2-bit quantization for background tokens. Staged via a 16-token Waiting Room (`WR`). |
+| **Tier 2: Heavy Hitters (HH)** | FP32 (Exact) | Dynamic `H_ratio` (e.g., top 5% of `max_seq_len`) | Stores critical historical tokens with the highest cumulative attention scores (`Global_Attn_Scr`). Dynamically demoted when stronger tokens arrive. |
+| **Tier 3: Background Storage (PBS)** | 2-bit Quantized (Packed `int32`) | Remaining token capacity (`max_background_tokens`) | KIVI-style asymmetric 2-bit quantization for background tokens. Staged via 16-token Packed Block Storage (`PBS`). |
 
 ---
 
-## Detailed Pipeline & Token Lifecycle
+## High-Performance C++ AVX2 & OpenMP Acceleration
 
-![Tri-Tier KV Cache Low-Level Design](tri_tier_cache_lld.svg)
+TriTierCache features an optimized native C++ kernel (`tri_tier._C`) compiled with `-mavx2`, `-mbmi2`, `-mfma`, and `-fopenmp`:
 
-### 1. Ingestion & FIFO Eviction
-- Incoming tokens ($K, V$) are first placed into the **Attention Sink** buffer until full (`SINK_SIZE = 4`).
-- Subsequent tokens populate the **Recent Window ring buffer** (`RW_K_Buffer`, `RW_V_Buffer`).
-- When the ring buffer reaches capacity, the oldest token at `RW_head_index` is evicted and passed to the eviction router.
-
-### 2. Eviction Routing & Heavy Hitter Management
-- Attention scores are tracked globally in `Global_Attn_Scr`.
-- A 95th-percentile attention score threshold is recalculated dynamically every `UPDATE_THRESHOLD = 32` tokens via `torch.quantile`.
-- **Routing Decision**:
-  - **Score $\ge$ Threshold**: 
-    - If Tier 2 (Heavy Hitters) has capacity, the token is added directly.
-    - If Tier 2 is full, the token's score is compared against the weakest Heavy Hitter (`argmin(HH_scores)`). If it beats the weakest HH, the weakest token is demoted to Tier 3 via `compress_and_store()` and replaced by the new token.
-  - **Score $<$ Threshold**: Routed directly to Tier 3 via `compress_and_store()`.
-
-### 3. Asymmetric 2-bit Quantization (KIVI-Style)
-Tokens demoted or routed to Tier 3 enter an intermediate 16-token **Waiting Room** (`WR`). Once `CHUNK_SIZE = 16` tokens accumulate:
-- **Key ($K$) Quantization**: Quantized **per-channel** across the 16 tokens in the chunk. 16 2-bit values are packed into a single `int32` per channel. Block-level scales and zero-points are preserved.
-- **Value ($V$) Quantization**: Quantized **per-token** across head channels. 16 2-bit values are packed into a single `int32` per token. Token-level scales and zero-points are preserved.
-- The packed tensors are stored in `PBS_K_Packed` and `PBS_V_Packed`.
-
-### 4. Cache Reconstruction (Before Attention)
-To compute attention accurately:
-1. Tier 3 background tokens are unpacked and dequantized back to FP32 using bitwise shifts, masks (`0b11`), scales, and zero-points.
-2. Tier 2 (Heavy Hitters) and Tier 3 (Background) are merged and sorted chronologically by token ID (`argsort(Middle_ids)`).
-3. Tier 1 (Recent Window) is unrolled in chronological order from the ring buffer using `torch.roll`.
-4. Sinks, Middle, and Recent Window tokens are concatenated into contiguous tensors: `K_Full`, `V_Full`, and `Full_ids`.
-
-### 5. Attention & Score Accumulation Loop
-- Scaled dot-product attention is computed: $\text{softmax}\left(\frac{Q \cdot K_{\text{full}}^T}{\sqrt{d_k}}\right) \cdot V_{\text{full}}$.
-- Resulting attention weights are averaged across heads and added into `Global_Attn_Scr` via `index_add_` matching `Full_ids`, feeding the next eviction decision.
+1. **Two-Pass Fused Decode Attention (`fused_attention_decode_avx2`)**:
+   - **Pass A (Score Projection)**: Computes dot products between query vectors $Q$ and dense KV (Sinks + Recent Window + Heavy Hitters) alongside 2-bit packed background blocks (PBS) using 256-bit AVX2 SIMD operations.
+   - **Softmax Normalization**: Computes numerically stable vector softmax scaling (`row_max` and `row_sum_exp`) per query head.
+   - **Pass B (Value Aggregation)**: Accumulates weighted $V$ vectors into the attention output using vectorized `axpy_avx2` FMA instructions.
+2. **OpenMP Multi-Threading**:
+   - Scales linearly across CPU cores by distributing query head processing across threads (`#pragma omp parallel for`).
+3. **On-the-Fly 2-Bit Dequantization**:
+   - Dequantizes 2-bit packed keys and values directly in CPU cache during attention passes, avoiding intermediate full-tensor memory reallocations.
+4. **Grouped Query Attention (GQA)**:
+   - Full native support for GQA architectures (such as LLaMA 3 / LLaMA 3.2), mapping query head groups to key-value heads.
+5. **Instant Batched Prefill**:
+   - Parallel prompt processing during prefill that seamlessly ingests prompt KV states into the tiered hierarchy in a single pass.
 
 ---
 
 ## Project Structure
 
 ```text
-├── tri_tier/
-│   ├── __init__.py            # Package initialization & exports
-│   ├── cache.py               # Core TriTierCache class & quantization logic
-│   ├── constants.py           # Config constants (CHUNK_SIZE, SINK_SIZE, etc.)
+├── csrc/                              # High-performance C++ AVX2 extension
+│   ├── bindings.cpp                   # PyBind11 bindings for tri_tier._C
+│   ├── cpu/
+│   │   ├── dequantize_avx2.cpp        # AVX2 2-bit K/V dequantization kernels
+│   │   ├── fused_attn_avx2.cpp        # OpenMP & AVX2 multi-head fused attention
+│   │   ├── quantize_k_avx2.cpp        # AVX2 2-bit per-channel key quantizer
+│   │   └── quantize_v_avx2.cpp        # AVX2 2-bit per-token value quantizer
+│   └── include/
+│       ├── dequant_avx2.h             # Header for dequantization routines
+│       ├── fused_attn_avx2.h          # Header for fused attention kernel
+│       └── quant_avx2.h               # Header for quantization routines
+├── tri_tier/                          # Core Python package
+│   ├── __init__.py                    # Package initialization & exports
+│   ├── constants.py                   # Default hyperparameters (CHUNK_SIZE, SINK_SIZE, etc.)
+│   ├── cache/
+│   │   ├── __init__.py
+│   │   └── tri_tier_cache.py          # TriTierCache implementation
 │   └── integration/
-│       ├── __init__.py        # Integration exports
-│       └── patch_llama.py     # Monkey patch for Hugging Face LLaMA attention
-├── csrc/                      # High-performance C++ & hardware extension scaffolding
-│   ├── cpu/                   # AVX2 & AVX-VNNI optimized SIMD kernels (Alder Lake P/E cores)
-│   └── include/               # Header definitions for packing/unpacking
-├── benchmarks/                # Benchmarking suite (Memory, Latency, Perplexity)
-├── tests/                     # Unit test suites
-│   ├── Test_cache_init.py     # Cache initialization and buffer sizing tests
-│   └── test_cache_methods.py  # Ingestion, routing, and scoring unit tests
-├── tri_tier_cache_hld.svg     # High-Level Architecture Diagram
-├── tri_tier_cache_lld.svg     # Low-Level Design Flowchart
-└── pyproject.toml             # Project configuration & dependencies
+│       ├── __init__.py
+│       └── patch_llama.py             # Hugging Face LLaMA attention monkey-patch
+├── benchmarks/                        # Comprehensive evaluation suite
+│   ├── utils.py                       # Benchmark helpers and baseline loaders
+│   ├── benchmark_correctness.py       # Greedy token match and cosine similarity tests
+│   ├── benchmark_latency.py           # TTFT and decode latency profiling
+│   ├── benchmark_memory.py            # Peak RSS and KV footprint profiling
+│   ├── benchmark_perplexity.py        # Long-sequence perplexity evaluation
+│   └── run_all_benchmarks.py          # Unified benchmark runner
+├── tests/                             # Unit tests
+│   ├── test_cache_init.py             # Initialization & buffer sizing tests
+│   ├── test_cache_methods.py          # Ingestion, routing, and scoring tests
+│   └── test_patch_llama.py            # LLaMA patch & GQA verification tests
+├── pyproject.toml                     # Build system specifications
+├── setup.py                           # C++ extension build script (AVX2 + OpenMP)
+└── smoke_test.py                      # End-to-end smoke test script
+```
+
+---
+
+## Installation & Build
+
+### Prerequisites
+- Linux x86_64 CPU with **AVX2**, **FMA**, and **BMI2** support
+- GCC / G++ $\ge$ 9.0 (with OpenMP support)
+- Python $\ge$ 3.10
+- PyTorch $\ge$ 2.1.0
+
+### Build from Source
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/RahulGPi/TriTierCache.git
+cd TriTierCache
+
+# 2. Install build dependencies
+pip install pybind11 setuptools
+
+# 3. Compile the C++ AVX2 extension in-place
+python setup.py build_ext --inplace
+
+# 4. Verify extension loading
+python -c "import tri_tier._C as _C; print('Extension built successfully:', _C.fused_attention_decode)"
 ```
 
 ---
 
 ## Quickstart
 
-### Prerequisites
-- Python $\ge$ 3.12
-- [uv](https://github.com/astral-sh/uv) (recommended) or `pip`
-- PyTorch $\ge$ 2.1.0
+### 1. Seamless Hugging Face LLaMA Integration
 
-### Installation
-
-Clone the repository and install dependencies with `uv`:
-
-```bash
-git clone https://github.com/RahulGPi/TriTierCache.git
-cd TriTierCache
-
-# Install dependencies using uv
-uv sync
-```
-
-### Usage with Hugging Face LLaMA
-
-You can monkey-patch Hugging Face's `LlamaAttention` layer with a single line:
+You can monkey-patch Hugging Face's `LlamaAttention` layers with a single call:
 
 ```python
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tri_tier.integration.patch_llama import apply_patch
 
-# 1. Apply the TriTierCache patch to LlamaAttention
+# 1. Apply the TriTierCache patch
 apply_patch()
 
-# 2. Load your model as normal
-model_id = "meta-llama/Llama-2-7b-hf"
+# 2. Load model and tokenizer
+model_id = "meta-llama/Llama-3.2-1B"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
@@ -196,29 +172,29 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="cpu"
 )
 
-# 3. Generate tokens autoregressively (decode mode)
-prompt = "Explain quantum computing in simple terms:"
+# 3. Generate text autoregressively
+prompt = "The quick brown fox jumps over the lazy dog"
 inputs = tokenizer(prompt, return_tensors="pt")
 
 with torch.no_grad():
     outputs = model.generate(
         **inputs,
-        max_new_tokens=128,
+        max_new_tokens=64,
         use_cache=True
     )
 
 print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 ```
 
-### Standalone Cache Usage
+### 2. Standalone Cache Usage
 
-You can also instantiate and manipulate the cache directly:
+You can also use [`TriTierCache`](file:///home/rahulpai/Global_Programming/idk_what_to_name_this/tri_tier/cache/tri_tier_cache.py) directly:
 
 ```python
 import torch
 from tri_tier import TriTierCache
 
-# Initialize cache
+# Initialize cache (e.g. 32 heads, 128 head dim, max 2048 tokens)
 cache = TriTierCache(
     max_seq_len=2048,
     head_dim=128,
@@ -236,30 +212,45 @@ cache.ingest_token(k_new, v_new)
 k_full, v_full, full_ids = cache.reconstruct_full_cache()
 
 # Compute attention and accumulate feedback scores
-# attn_weights shape: [batch_size, num_heads, 1, seq_len]
 attn_weights = torch.randn(1, 32, 1, k_full.shape[0]).softmax(dim=-1)
 cache.accumulate_attn_scrs(attn_weights, full_ids)
 ```
 
 ---
 
-## Running Tests
+## Benchmarks & Evaluation
+
+TriTierCache includes an automated benchmark suite comparing TriTierCache against Vanilla Hugging Face Attention (`DynamicCache`):
+
+```bash
+# Run quick benchmark validation across all metrics
+PYTHONPATH=. python benchmarks/run_all_benchmarks.py --quick
+
+# Or run individual benchmark modules:
+PYTHONPATH=. python benchmarks/benchmark_correctness.py
+PYTHONPATH=. python benchmarks/benchmark_latency.py
+PYTHONPATH=. python benchmarks/benchmark_memory.py
+PYTHONPATH=. python benchmarks/benchmark_perplexity.py
+```
+
+Generated metrics are automatically exported to CSV in `benchmarks/results/`:
+- `correctness_results.csv`: Output token match and cosine similarity.
+- `latency_results.csv`: TTFT (prefill) and per-token decode latency across prompt lengths.
+- `memory_results.csv`: Peak RSS memory and KV cache buffer footprint.
+- `perplexity_results.csv`: Perplexity evaluation across sequence lengths.
+
+---
+
+## Running Unit Tests
 
 Run the test suite with `pytest`:
 
 ```bash
-PYTHONPATH=. uv run pytest -v
+PYTHONPATH=. pytest -v
 ```
 
 ---
 
-## Roadmap & Hardware Optimization Goals
+## License
 
-- [x] Pure PyTorch 3-Tier KV Cache prototype (Sinks + Recent Window + Heavy Hitters + 2-bit Background).
-- [x] KIVI-style asymmetric 2-bit quantization (per-channel for $K$, per-token for $V$).
-- [x] Hugging Face `LlamaAttention` integration hook with GQA support.
-- [ ] **Alder Lake CPU SIMD (`csrc/cpu/`)**: Custom AVX2 + AVX-VNNI vectorized kernels for fast 2-bit packing and dequantization on Golden Cove / Gracemont cores.
-- [ ] **Intel Iris Xe (Xe-LP) iGPU Acceleration**: SYCL / Level Zero / IPEX kernels utilizing DP4A for INT8/INT4/INT2 matrix multiply on Iris Xe.
-- [ ] Direct fused attention on compressed KV tiers without intermediate FP32 buffer allocation.
-- [ ] Pre-fill phase batching support.
-- [ ] Comprehensive latency and memory benchmarks on Intel Core i5-12500H + Iris Xe Graphics.
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
