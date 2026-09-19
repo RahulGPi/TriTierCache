@@ -65,3 +65,7 @@ core
 *.swp
 *.swo
 *~
+
+# Data and Benchmark Reports
+*.csv
+benchmarks/results/*.csv

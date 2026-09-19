@@ -1,6 +1,0 @@
-context_length,vanilla_allocated_rss_mb,tritier_allocated_rss_mb
-512,0.0,0.0
-1024,0.0,0.0
-2048,0.0,0.0
-4096,0.0,0.0
-8192,0.0,0.0
