@@ -18,7 +18,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from tri_tier.cache import TriTierCache
-from tri_tier.constants import UPDATE_THRESHOLD, CHUNK_SIZE
+from tri_tier.constants import UPDATE_THRESHOLD, CHUNK_SIZE, SINK_SIZE
 
 MAX_SEQ_LEN = 128
 HEAD_DIM = 16
@@ -105,22 +105,24 @@ class TestIngestToken:
         route_mock = MagicMock()
         monkeypatch.setattr(cache, "route_evicted_token", route_mock)
 
-        for i in range(R_SIZE):
+        # First SINK_SIZE tokens fill the attention sink buffer, then R_SIZE fill recent window
+        for i in range(SINK_SIZE + R_SIZE):
             k = torch.full((NUM_HEADS, HEAD_DIM), float(i))
             v = torch.full((NUM_HEADS, HEAD_DIM), float(i) * 10)
             cache.ingest_token(k, v)
 
+        assert cache.S_count == SINK_SIZE
         assert cache.RW_count == R_SIZE
         assert cache.RW_head_index == 0
-        assert cache.Total_Processed_Tokens == R_SIZE
+        assert cache.Total_Processed_Tokens == SINK_SIZE + R_SIZE
         route_mock.assert_not_called()
-        assert torch.all(cache.RW_K_Buffer[3] == 3.0)
+        assert torch.all(cache.RW_K_Buffer[3] == float(SINK_SIZE + 3))
 
     def test_eviction_overwrites_oldest_slot_and_advances_head(self, cache, monkeypatch):
         route_mock = MagicMock()
         monkeypatch.setattr(cache, "route_evicted_token", route_mock)
 
-        for i in range(R_SIZE):
+        for i in range(SINK_SIZE + R_SIZE):
             cache.ingest_token(
                 torch.full((NUM_HEADS, HEAD_DIM), float(i)),
                 torch.full((NUM_HEADS, HEAD_DIM), float(i)),
@@ -132,23 +134,23 @@ class TestIngestToken:
 
         route_mock.assert_called_once()
         _, _, evicted_id = route_mock.call_args[0]
-        assert evicted_id == 0  # first token ingested is the first evicted
+        assert evicted_id == SINK_SIZE  # first non-sink token ingested is the first evicted
         assert torch.all(cache.RW_K_Buffer[0] == 999.0)  # slot 0 overwritten
         assert cache.RW_head_index == 1
-        assert cache.Total_Processed_Tokens == R_SIZE + 1
+        assert cache.Total_Processed_Tokens == SINK_SIZE + R_SIZE + 1
 
     def test_evicted_token_id_formula_stays_correct_across_wraps(self, cache, monkeypatch):
         route_mock = MagicMock()
         monkeypatch.setattr(cache, "route_evicted_token", route_mock)
 
-        # fill once, then evict R_SIZE more times to wrap the ring buffer fully
-        for i in range(R_SIZE + R_SIZE):
+        # fill sinks + RW, then evict R_SIZE more times to wrap the ring buffer fully
+        for i in range(SINK_SIZE + R_SIZE + R_SIZE):
             cache.ingest_token(
                 torch.zeros(NUM_HEADS, HEAD_DIM), torch.zeros(NUM_HEADS, HEAD_DIM)
             )
 
         evicted_ids = [call.args[2] for call in route_mock.call_args_list]
-        assert evicted_ids == list(range(R_SIZE))
+        assert evicted_ids == list(range(SINK_SIZE, SINK_SIZE + R_SIZE))
 
 
 # ---------------------------------------------------------------------------
