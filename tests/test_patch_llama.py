@@ -103,13 +103,19 @@ class TestStandardMHA:
         pos_ids = torch.tensor([[0]])
         cos, sin = rotary_emb(hidden_states, pos_ids)
 
+        # Fused path (default: output_attentions=False)
         output, attn_weights = layer(hidden_states, position_embeddings=(cos, sin))
-
         assert output.shape == (1, 1, config.hidden_size)
-        assert attn_weights.shape == (1, 4, 1, 1)
         assert not torch.isnan(output).any()
-        assert not torch.isnan(attn_weights).any()
-        assert torch.allclose(attn_weights.sum(dim=-1), torch.ones(1, 4, 1), atol=1e-5)
+        assert attn_weights is None
+
+        # Fallback reference path (output_attentions=True)
+        output_ref, attn_weights_ref = layer(hidden_states, position_embeddings=(cos, sin), output_attentions=True)
+        assert output_ref.shape == (1, 1, config.hidden_size)
+        assert attn_weights_ref.shape == (1, 4, 1, 2)
+        assert not torch.isnan(output_ref).any()
+        assert not torch.isnan(attn_weights_ref).any()
+        assert torch.allclose(attn_weights_ref.sum(dim=-1), torch.ones(1, 4, 1), atol=1e-5)
 
 
 class TestGQA:
@@ -131,11 +137,17 @@ class TestGQA:
         pos_ids = torch.tensor([[0]])
         cos, sin = rotary_emb(hidden_states, pos_ids)
 
+        # Fused path
         output, attn_weights = layer(hidden_states, position_embeddings=(cos, sin))
-
         assert output.shape == (1, 1, hidden_size)
-        assert attn_weights.shape == (1, num_q_heads, 1, 1)
         assert not torch.isnan(output).any()
+        assert attn_weights is None
+
+        # Fallback reference path (output_attentions=True)
+        output_ref, attn_weights_ref = layer(hidden_states, position_embeddings=(cos, sin), output_attentions=True)
+        assert output_ref.shape == (1, 1, hidden_size)
+        assert attn_weights_ref.shape == (1, num_q_heads, 1, 2)
+        assert not torch.isnan(output_ref).any()
 
 
 class TestMultiStepExecutionAndTiering:
@@ -160,7 +172,7 @@ class TestMultiStepExecutionAndTiering:
             pos_ids = torch.tensor([[step]])
             cos, sin = rotary_emb(hidden_states, pos_ids)
 
-            output, attn_weights = layer(hidden_states, position_embeddings=(cos, sin))
+            output, attn_weights = layer(hidden_states, position_embeddings=(cos, sin), output_attentions=True)
 
             assert output.shape == (1, 1, hidden_size)
             assert not torch.isnan(output).any()
