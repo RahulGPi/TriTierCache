@@ -54,27 +54,30 @@ void fused_attention_decode_avx2(
     const float* PBS_V_Zeroes,
     const int64_t* PBS_token_ids,
     int num_blocks,
-    int num_heads,
+    int num_q_heads,
+    int num_kv_heads,
     int head_dim,
-    float* attn_output)
+    float* attn_output,
+    float* mean_attn_weights)
 {
     const float inv_sqrt_hd = 1.0f / std::sqrt(static_cast<float>(head_dim));
     const int total_pbs     = num_blocks * 16;
     const int total_tokens  = dense_count + total_pbs;
     const float NEG_INF     = -std::numeric_limits<float>::infinity();
+    const int gqa_ratio     = (num_kv_heads > 0) ? (num_q_heads / num_kv_heads) : 1;
 
-    // One score per (head, token) — NOT per (head, token, channel). This is
-    // the whole reason this kernel is small: no full K or V ever exists.
-    std::vector<float> scores(static_cast<size_t>(num_heads) * total_tokens);
+    // One score per (query head, token)
+    std::vector<float> scores(static_cast<size_t>(num_q_heads) * total_tokens);
 
-    // Reused scratch for one dequantized PBS block: 16 tokens, all heads.
-    std::vector<float> block_buf(16 * static_cast<size_t>(num_heads) * head_dim);
+    // Reused scratch for one dequantized PBS block: 16 tokens, num_kv_heads.
+    std::vector<float> block_buf(16 * static_cast<size_t>(num_kv_heads) * head_dim);
 
     // ---------------- Pass A: raw scores (pre-softmax) ----------------
 
     for (int i = 0; i < dense_count; ++i) {
-        for (int h = 0; h < num_heads; ++h) {
-            const float* k = dense_K + (static_cast<size_t>(i) * num_heads + h) * head_dim;
+        for (int h = 0; h < num_q_heads; ++h) {
+            int kv_h = (gqa_ratio > 1) ? (h / gqa_ratio) : h;
+            const float* k = dense_K + (static_cast<size_t>(i) * num_kv_heads + kv_h) * head_dim;
             const float* q = Q + h * head_dim;
             scores[h * total_tokens + i] = dot_avx2(q, k, head_dim) * inv_sqrt_hd;
         }
@@ -82,74 +85,93 @@ void fused_attention_decode_avx2(
 
     for (int b = 0; b < num_blocks; ++b) {
         dequantize_k_avx2(
-            PBS_K_Packed + static_cast<size_t>(b) * num_heads * head_dim,
-            PBS_K_Scales + static_cast<size_t>(b) * num_heads * head_dim,
-            PBS_K_Zeroes + static_cast<size_t>(b) * num_heads * head_dim,
+            PBS_K_Packed + static_cast<size_t>(b) * num_kv_heads * head_dim,
+            PBS_K_Scales + static_cast<size_t>(b) * num_kv_heads * head_dim,
+            PBS_K_Zeroes + static_cast<size_t>(b) * num_kv_heads * head_dim,
             block_buf.data(),
-            /*num_blocks=*/1, num_heads, head_dim);
+            /*num_blocks=*/1, num_kv_heads, head_dim);
 
         for (int t = 0; t < 16; ++t) {
             int global_idx = dense_count + b * 16 + t;
             bool valid = PBS_token_ids[b * 16 + t] != -1;
-            for (int h = 0; h < num_heads; ++h) {
+            for (int h = 0; h < num_q_heads; ++h) {
                 if (!valid) {
                     scores[h * total_tokens + global_idx] = NEG_INF;
                     continue;
                 }
-                const float* k = block_buf.data() + (static_cast<size_t>(t) * num_heads + h) * head_dim;
+                int kv_h = (gqa_ratio > 1) ? (h / gqa_ratio) : h;
+                const float* k = block_buf.data() + (static_cast<size_t>(t) * num_kv_heads + kv_h) * head_dim;
                 const float* q = Q + h * head_dim;
                 scores[h * total_tokens + global_idx] = dot_avx2(q, k, head_dim) * inv_sqrt_hd;
             }
         }
     }
 
-    // ---------------- Softmax stats per head ----------------
-    std::vector<float> row_max(num_heads, NEG_INF);
-    std::vector<float> row_sum_exp(num_heads, 0.0f);
+    // ---------------- Softmax stats per query head ----------------
+    std::vector<float> row_max(num_q_heads, NEG_INF);
+    std::vector<float> row_sum_exp(num_q_heads, 0.0f);
 
-    for (int h = 0; h < num_heads; ++h) {
+    for (int h = 0; h < num_q_heads; ++h) {
         const float* row = &scores[static_cast<size_t>(h) * total_tokens];
         float mx = NEG_INF;
         for (int i = 0; i < total_tokens; ++i) mx = std::max(mx, row[i]);
         row_max[h] = mx;
 
         float sum = 0.0f;
-        for (int i = 0; i < total_tokens; ++i) sum += std::exp(row[i] - mx); // exp(-inf)=0
-        row_sum_exp[h] = sum;
+        for (int i = 0; i < total_tokens; ++i) {
+            if (row[i] != NEG_INF) {
+                sum += std::exp(row[i] - mx);
+            }
+        }
+        row_sum_exp[h] = sum > 0.0f ? sum : 1.0f;
     }
 
     // ---------------- Pass B: weighted sum of V ----------------
-    for (size_t i = 0; i < static_cast<size_t>(num_heads) * head_dim; ++i) attn_output[i] = 0.0f;
+    for (size_t i = 0; i < static_cast<size_t>(num_q_heads) * head_dim; ++i) attn_output[i] = 0.0f;
 
     for (int i = 0; i < dense_count; ++i) {
-        for (int h = 0; h < num_heads; ++h) {
+        for (int h = 0; h < num_q_heads; ++h) {
+            int kv_h = (gqa_ratio > 1) ? (h / gqa_ratio) : h;
             float w = std::exp(scores[h * total_tokens + i] - row_max[h]);
-            const float* v = dense_V + (static_cast<size_t>(i) * num_heads + h) * head_dim;
+            const float* v = dense_V + (static_cast<size_t>(i) * num_kv_heads + kv_h) * head_dim;
             axpy_avx2(attn_output + h * head_dim, v, w, head_dim);
         }
     }
 
     for (int b = 0; b < num_blocks; ++b) {
         dequantize_v_avx2(
-            PBS_V_Packed + static_cast<size_t>(b) * 16 * num_heads * ((head_dim + 15) / 16),
-            PBS_V_Scales + static_cast<size_t>(b) * 16 * num_heads,
-            PBS_V_Zeroes + static_cast<size_t>(b) * 16 * num_heads,
+            PBS_V_Packed + static_cast<size_t>(b) * 16 * num_kv_heads * ((head_dim + 15) / 16),
+            PBS_V_Scales + static_cast<size_t>(b) * 16 * num_kv_heads,
+            PBS_V_Zeroes + static_cast<size_t>(b) * 16 * num_kv_heads,
             block_buf.data(),
-            /*total_tokens=*/16, num_heads, head_dim);
+            /*total_tokens=*/16, num_kv_heads, head_dim);
 
         for (int t = 0; t < 16; ++t) {
             if (PBS_token_ids[b * 16 + t] == -1) continue;
             int global_idx = dense_count + b * 16 + t;
-            for (int h = 0; h < num_heads; ++h) {
+            for (int h = 0; h < num_q_heads; ++h) {
+                int kv_h = (gqa_ratio > 1) ? (h / gqa_ratio) : h;
                 float w = std::exp(scores[h * total_tokens + global_idx] - row_max[h]);
-                const float* v = block_buf.data() + (static_cast<size_t>(t) * num_heads + h) * head_dim;
+                const float* v = block_buf.data() + (static_cast<size_t>(t) * num_kv_heads + kv_h) * head_dim;
                 axpy_avx2(attn_output + h * head_dim, v, w, head_dim);
             }
         }
     }
 
-    for (int h = 0; h < num_heads; ++h) {
+    for (int h = 0; h < num_q_heads; ++h) {
         float inv_sum = 1.0f / row_sum_exp[h];
         for (int c = 0; c < head_dim; ++c) attn_output[h * head_dim + c] *= inv_sum;
+    }
+
+    if (mean_attn_weights) {
+        for (int i = 0; i < total_tokens; ++i) {
+            float sum_w = 0.0f;
+            for (int h = 0; h < num_q_heads; ++h) {
+                if (scores[static_cast<size_t>(h) * total_tokens + i] == NEG_INF) continue;
+                float w = std::exp(scores[static_cast<size_t>(h) * total_tokens + i] - row_max[h]) / row_sum_exp[h];
+                sum_w += w;
+            }
+            mean_attn_weights[i] = sum_w / static_cast<float>(num_q_heads);
+        }
     }
 }
