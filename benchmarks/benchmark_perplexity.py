@@ -159,63 +159,81 @@ def benchmark_perplexity_suite(model_name: str = DEFAULT_MODEL_ID,
 
 def benchmark_ablation_sweep(model_name: str = DEFAULT_MODEL_ID,
                              eval_len: int = 1024,
-                             repeats: int = 5,
-                             seeds: List[int] = None) -> List[Dict[str, Any]]:
-    print("\n" + "=" * 115)
-    print(f" [2/3] BENCHMARKING QUALITY VS COMPRESSION ABLATION ({repeats} Seeds Mean ± Std, eval_len={eval_len})")
-    print("=" * 115)
+                             num_samples: int = 3,
+                             run_config: RunConfig = None) -> List[Dict[str, Any]]:
+    if run_config is None:
+        run_config = RunConfig(model_id=model_name)
+    set_seed(run_config.seed)
 
-    if seeds is None:
-        seeds = [42, 43, 44, 45, 46][:repeats]
+    print("\n" + "=" * 125)
+    print(f" [2/3] BENCHMARKING QUALITY VS COMPRESSION ABLATION ({num_samples} Distinct Samples Mean ± Std, eval_len={eval_len})")
+    print("=" * 125)
 
     model, tok = load_model(model_name, dtype=torch.float32)
-    corpus = get_evaluation_corpus(min_tokens=eval_len + 100, tokenizer=tok)
-    input_ids = tok(corpus, return_tensors="pt").input_ids[:, :eval_len]
+    corpus = get_evaluation_corpus(min_tokens=(eval_len * num_samples) + 200, tokenizer=tok)
+    all_tokens = tok(corpus, return_tensors="pt").input_ids
+
+    stride = max(100, (all_tokens.shape[1] - eval_len) // max(1, num_samples))
+    sample_inputs = [all_tokens[:, s * stride : s * stride + eval_len] for s in range(num_samples)]
 
     h_ratios = [0.01, 0.05, 0.10]
     r_sizes = [64, 128, 256]
     ablation_records = []
 
-    print(f"{'H_ratio':<8} | {'R_size':<8} | {'PPL (Mean ± Std)':<22} | {'Comp Ratio (vs FP16)':<22} | {'Comp Ratio (vs FP32)'}")
-    print("-" * 115)
+    print(f"{'H_ratio':<8} | {'R_size':<8} | {'PPL (Mean ± Std)':<24} | {'Comp @ EvalLen':<16} | {'Comp @ 32k':<14} | {'Per-Sample PPLs'}")
+    print("-" * 125)
 
     for h_rat in h_ratios:
         for r_sz in r_sizes:
             patch_mod.H_RATIO = h_rat
             patch_mod.R_SIZE = r_sz
 
-            ppl_repeats = []
-            for seed in seeds:
-                set_seed(seed)
+            ppl_samples = []
+            for s_idx, curr_input in enumerate(sample_inputs):
                 apply_patch()
                 reset_caches(model)
-                ppl = evaluate_perplexity_step_by_step(model, input_ids, max_eval_tokens=eval_len)
-                ppl_repeats.append(ppl)
+                ppl = evaluate_perplexity_step_by_step(model, curr_input, max_eval_tokens=eval_len)
+                ppl_samples.append(ppl)
 
-            mean_ppl = float(np.mean(ppl_repeats))
-            std_ppl = float(np.std(ppl_repeats))
+            mean_ppl = float(np.mean(ppl_samples))
+            std_ppl = float(np.std(ppl_samples))
 
-            # Theoretical compression calculation at 32k tokens
-            comp_info = measure_cache_bytes(
-                total_tokens=32768, config=model.config,
-                r_size=r_sz, h_ratio=h_rat
+            # Exact compression at eval_len
+            comp_eval = measure_cache_bytes(
+                total_tokens=eval_len, config=model.config,
+                r_size=r_sz, h_ratio=h_rat,
+                k_group_size=run_config.K_group_size,
+                pbs_metadata_dtype=run_config.pbs_metadata_dtype,
             )
-            ratio_fp16 = comp_info["compression_ratio_vs_fp16"]
-            ratio_fp32 = comp_info["compression_ratio_vs_fp32"]
+            ratio_eval_fp16 = comp_eval["compression_ratio_vs_fp16"]
 
+            # Asymptotic compression at 32k
+            comp_32k = measure_cache_bytes(
+                total_tokens=32768, config=model.config,
+                r_size=r_sz, h_ratio=h_rat,
+                k_group_size=run_config.K_group_size,
+                pbs_metadata_dtype=run_config.pbs_metadata_dtype,
+            )
+            ratio_32k_fp16 = comp_32k["compression_ratio_vs_fp16"]
+
+            samples_str = "[" + ", ".join([f"{p:.2f}" for p in ppl_samples]) + "]"
             ppl_str = f"{mean_ppl:.4f} ± {std_ppl:.4f}"
-            print(f"{h_rat:<8.2f} | {r_sz:<8d} | {ppl_str:<22} | {ratio_fp16:<22.2f}x | {ratio_fp32:.2f}x")
+            print(f"{h_rat:<8.2f} | {r_sz:<8d} | {ppl_str:<24} | {ratio_eval_fp16:<15.2f}x | {ratio_32k_fp16:<13.2f}x | {samples_str}")
 
-            row = {
+            run_config.H_ratio = h_rat
+            run_config.R_size = r_sz
+            row = run_config.to_dict()
+            row.update({
                 "H_ratio": h_rat,
                 "R_size": r_sz,
+                "eval_tokens": eval_len,
                 "mean_perplexity": mean_ppl,
                 "std_perplexity": std_ppl,
-                "repeats": repeats,
-                "seeds": str(seeds),
-                "compression_ratio_fp16": ratio_fp16,
-                "compression_ratio_fp32": ratio_fp32,
-            }
+                "num_samples": num_samples,
+                "per_sample_ppls": samples_str,
+                "compression_ratio_eval_len": ratio_eval_fp16,
+                "compression_ratio_32k": ratio_32k_fp16,
+            })
             ablation_records.append(row)
 
     patch_mod.H_RATIO = 0.05
@@ -318,15 +336,19 @@ def run_benchmark(model_name: str = DEFAULT_MODEL_ID,
     if run_config is None:
         run_config = RunConfig(model_id=model_name)
 
-    # 1. Perplexity suite (5 samples)
+    # 1. Perplexity suite (canonical non-repeating methodology)
     num_samples = 3 if quick else 5
-    ppl_res = benchmark_perplexity_suite(model_name=model_name, eval_len=2048, num_samples=num_samples, run_config=run_config)
+    eval_len = 1024
+    ppl_res = benchmark_perplexity_suite(model_name=model_name, eval_len=eval_len, num_samples=num_samples, run_config=run_config)
     save_results_to_csv(os.path.join(output_dir, "perplexity_results.csv"), ppl_res)
 
-    # 2. Ablation sweep (5 seeds)
-    ablation_len = 1024 if quick else 2048
-    ablation_repeats = 3 if quick else 5
-    ablation_res = benchmark_ablation_sweep(model_name=model_name, eval_len=ablation_len, repeats=ablation_repeats)
+    # 2. Ablation sweep (multi-sample on identical canonical methodology)
+    ablation_res = benchmark_ablation_sweep(
+        model_name=model_name, 
+        eval_len=eval_len, 
+        num_samples=num_samples,
+        run_config=run_config
+    )
     save_results_to_csv(os.path.join(output_dir, "ablation_results.csv"), ablation_res)
 
     # 3. Needle In A Haystack
