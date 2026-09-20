@@ -126,14 +126,12 @@ def benchmark_numerical_drift(model_name: str,
         past_kv = None
 
         with torch.no_grad():
-            for pos in range(input_ids.shape[1]):
-                tok_in = curr_ids[:, pos:pos+1]
-                if not use_tritier:
-                    out = model(tok_in, past_key_values=past_kv, use_cache=True)
-                    past_kv = out.past_key_values if hasattr(out, "past_key_values") else None
-                else:
-                    out = model(tok_in, position_ids=torch.tensor([[pos]], dtype=torch.int64))
-                    past_kv = None
+            if not use_tritier:
+                out = model(input_ids, use_cache=True)
+                past_kv = out.past_key_values if hasattr(out, "past_key_values") else None
+            else:
+                out = model(input_ids)
+                past_kv = None
 
             for step in range(decode_steps):
                 last_logits = out.logits[:, -1, :].clone()
@@ -158,19 +156,21 @@ def benchmark_numerical_drift(model_name: str,
     print("-" * 95)
 
     for step, (v_log, t_log) in enumerate(zip(vanilla_logits, tritier_logits), start=1):
-        cos_sim = F.cosine_similarity(v_log.float(), t_log.float(), dim=-1).mean().item()
-        mse = F.mse_loss(v_log.float(), t_log.float()).item()
-        max_diff = torch.max(torch.abs(v_log.float() - t_log.float())).item()
-        top1_match = bool(v_log.argmax(dim=-1) == t_log.argmax(dim=-1))
+        cos_sim = F.cosine_similarity(v_log, t_log, dim=-1).item()
+        mse = F.mse_loss(v_log, t_log).item()
+        max_abs = torch.max(torch.abs(v_log - t_log)).item()
+        v_top1 = v_log.argmax(dim=-1).item()
+        t_top1 = t_log.argmax(dim=-1).item()
+        match_str = "Match" if v_top1 == t_top1 else "Mismatch"
 
-        print(f"{step:<6d} | {cos_sim:<14.6f} | {mse:<14.6f} | {max_diff:<16.6f} | {'Match' if top1_match else 'Mismatch'}")
+        print(f"{step:<6d} | {cos_sim:<14.6f} | {mse:<14.6f} | {max_abs:<16.6f} | {match_str}")
 
         row = {
-            "decode_step": step,
+            "step": step,
             "cosine_similarity": cos_sim,
             "mse": mse,
-            "max_abs_diff": max_diff,
-            "top1_match": top1_match,
+            "max_abs_diff": max_abs,
+            "top1_match": (v_top1 == t_top1),
         }
         row.update(run_config.to_dict())
         drift_records.append(row)
@@ -185,8 +185,8 @@ def run_benchmark(model_name: str = DEFAULT_MODEL_ID,
     os.makedirs(output_dir, exist_ok=True)
     if run_config is None:
         run_config = RunConfig(model_id=model_name)
-    prompt_lens = [4096] if quick else [4096, 16384]
-    gen_tokens = 500
+    prompt_lens = [256] if quick else [4096, 16384]
+    gen_tokens = 50 if quick else 500
 
     # 1. Top-1 Token Agreement
     match_results = benchmark_top1_token_agreement(model_name, prompt_lengths=prompt_lens, gen_tokens=gen_tokens, run_config=run_config)
