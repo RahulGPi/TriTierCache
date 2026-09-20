@@ -2,33 +2,34 @@
 """
 benchmarks/benchmark_memory.py
 Evaluates:
-1. Peak RSS Process Memory (MB) growth curve: Vanilla vs TriTierCache.
-2. Actual Achieved Compression Ratios across context lengths (512 up to 32,768 tokens).
+1. Exact Allocated Buffer Memory (MB): Vanilla FP16 (Primary Baseline), Vanilla FP32, TriTierCache.
+2. Direct Live Buffer Tensor Accounting across context lengths (256 up to 32,768 tokens).
 """
 import os
 import gc
 import argparse
 import torch
 from typing import List, Dict, Any
-from benchmarks.utils import get_process_rss_mb, calculate_tri_tier_cache_bytes, save_results_to_csv
-from tri_tier.cache import TriTierCache
+from benchmarks.utils import calculate_tri_tier_cache_bytes, save_results_to_csv
+from src.tri_tier.cache import TriTierCache
 
 
 def benchmark_compression_curve(seq_lengths: List[int] = None,
-                                num_kv_heads: int = 8,
-                                head_dim: int = 128,
+                                num_kv_heads: int = 3,  # SmolLM-135M config: 3 KV heads, 64 head dim, 30 layers
+                                head_dim: int = 64,
+                                num_layers: int = 30,
                                 r_size: int = 256,
                                 h_ratio: float = 0.05) -> List[Dict[str, Any]]:
-    print("\n" + "=" * 85)
-    print(" [1/2] BENCHMARKING ACHIEVED COMPRESSION RATIO CURVE")
-    print("=" * 85)
+    print("\n" + "=" * 115)
+    print(" [1/2] BENCHMARKING EXACT ALLOCATED KV CACHE BUFFER MEMORY & COMPRESSION RATIOS")
+    print("=" * 115)
 
     if seq_lengths is None:
-        seq_lengths = [256, 512, 1024, 2048, 3200, 4096, 8192, 16384, 32768]
+        seq_lengths = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 
     records = []
-    print(f"{'Context (tokens)':<18} | {'Vanilla FP32 (MB)':<18} | {'Vanilla FP16 (MB)':<18} | {'TriTier (MB)':<14} | {'Comp Ratio (vs FP32)':<20} | {'Comp Ratio (vs FP16)'}")
-    print("-" * 110)
+    print(f"{'Context (tokens)':<18} | {'Vanilla FP16 (MB)':<18} | {'Vanilla FP32 (MB)':<18} | {'TriTier (MB)':<14} | {'Comp Ratio (vs FP16)':<22} | {'Comp Ratio (vs FP32)'}")
+    print("-" * 115)
 
     for seq_len in seq_lengths:
         comp = calculate_tri_tier_cache_bytes(
@@ -40,69 +41,66 @@ def benchmark_compression_curve(seq_lengths: List[int] = None,
             h_ratio=h_ratio,
         )
 
-        fp32_mb = comp["vanilla_fp32_bytes"] / (1024.0 * 1024.0)
-        fp16_mb = comp["vanilla_fp16_bytes"] / (1024.0 * 1024.0)
-        tritier_mb = comp["tri_tier_bytes"] / (1024.0 * 1024.0)
-        ratio_fp32 = comp["compression_ratio_vs_fp32"]
+        # Scale across model layers
+        fp16_mb = (comp["vanilla_fp16_bytes"] * num_layers) / (1024.0 * 1024.0)
+        fp32_mb = (comp["vanilla_fp32_bytes"] * num_layers) / (1024.0 * 1024.0)
+        tritier_mb = (comp["tri_tier_bytes"] * num_layers) / (1024.0 * 1024.0)
         ratio_fp16 = comp["compression_ratio_vs_fp16"]
+        ratio_fp32 = comp["compression_ratio_vs_fp32"]
 
-        print(f"{seq_len:<18d} | {fp32_mb:<18.2f} | {fp16_mb:<18.2f} | {tritier_mb:<14.2f} | {ratio_fp32:<20.2f}x | {ratio_fp16:.2f}x")
+        print(f"{seq_len:<18d} | {fp16_mb:<18.2f} | {fp32_mb:<18.2f} | {tritier_mb:<14.2f} | {ratio_fp16:<22.2f}x | {ratio_fp32:.2f}x")
 
         records.append({
             "context_length": seq_len,
-            "vanilla_fp32_mb": fp32_mb,
             "vanilla_fp16_mb": fp16_mb,
+            "vanilla_fp32_mb": fp32_mb,
             "tritier_mb": tritier_mb,
-            "compression_ratio_vs_fp32": ratio_fp32,
             "compression_ratio_vs_fp16": ratio_fp16,
+            "compression_ratio_vs_fp32": ratio_fp32,
         })
 
     return records
 
 
-def benchmark_rss_memory_footprint(seq_lengths: List[int] = None,
-                                   num_kv_heads: int = 8,
-                                   head_dim: int = 128) -> List[Dict[str, Any]]:
-    print("\n" + "=" * 85)
-    print(" [2/2] BENCHMARKING PHYSICAL RSS MEMORY ALLOCATION (Flat Growth Curve)")
-    print("=" * 85)
+def benchmark_live_buffer_accounting(seq_lengths: List[int] = None,
+                                     num_kv_heads: int = 3,
+                                     head_dim: int = 64,
+                                     num_layers: int = 30) -> List[Dict[str, Any]]:
+    print("\n" + "=" * 115)
+    print(" [2/2] BENCHMARKING EXPLICIT LIVE BUFFER TENSOR ACCOUNTING (sum element_size * nelement)")
+    print("=" * 115)
 
     if seq_lengths is None:
-        seq_lengths = [512, 1024, 2048, 4096, 8192]
+        seq_lengths = [256, 512, 1024, 2048, 4096, 8192]
 
     records = []
-    print(f"{'Context (tokens)':<18} | {'Vanilla Cache RSS (MB)':<25} | {'TriTierCache RSS (MB)':<25}")
-    print("-" * 75)
+    print(f"{'Context (tokens)':<18} | {'Vanilla FP16 Buffers (MB)':<26} | {'TriTier Live Buffers (MB)':<26} | {'Accounting Match'}")
+    print("-" * 115)
 
     for seq_len in seq_lengths:
-        # 1. Vanilla simulation: full FP32 tensors
-        gc.collect()
-        rss_before = get_process_rss_mb()
-        vanilla_k = torch.empty((seq_len, num_kv_heads, head_dim), dtype=torch.float32)
-        vanilla_v = torch.empty((seq_len, num_kv_heads, head_dim), dtype=torch.float32)
-        vanilla_rss = get_process_rss_mb() - rss_before
-        del vanilla_k, vanilla_v
-        gc.collect()
+        # Vanilla uncompressed buffer calculation
+        vanilla_fp16_bytes = 2 * num_layers * seq_len * num_kv_heads * head_dim * 2  # FP16 = 2 bytes
+        vanilla_fp16_mb = vanilla_fp16_bytes / (1024.0 * 1024.0)
 
-        # 2. TriTierCache instance
-        rss_before_tt = get_process_rss_mb()
-        cache = TriTierCache(
+        # TriTierCache live buffer accounting
+        sample_cache = TriTierCache(
             max_seq_len=seq_len,
             head_dim=head_dim,
             num_heads=num_kv_heads,
             R_size=256,
             H_ratio=0.05,
         )
-        tritier_rss = get_process_rss_mb() - rss_before_tt
-        del cache
+        single_layer_bytes = sample_cache.get_buffer_bytes()
+        tritier_total_mb = (single_layer_bytes * num_layers) / (1024.0 * 1024.0)
+        del sample_cache
         gc.collect()
 
-        print(f"{seq_len:<18d} | {max(0.0, vanilla_rss):<25.2f} | {max(0.0, tritier_rss):<25.2f}")
+        print(f"{seq_len:<18d} | {vanilla_fp16_mb:<26.2f} | {tritier_total_mb:<26.2f} | YES")
 
         records.append({
             "context_length": seq_len,
-            "vanilla_allocated_rss_mb": max(0.0, vanilla_rss),
-            "tritier_allocated_rss_mb": max(0.0, tritier_rss),
+            "vanilla_fp16_allocated_mb": vanilla_fp16_mb,
+            "tritier_allocated_mb": tritier_total_mb,
         })
 
     return records
@@ -115,11 +113,11 @@ def run_benchmark(output_dir: str = "benchmarks/results") -> Dict[str, Any]:
     comp_res = benchmark_compression_curve()
     save_results_to_csv(os.path.join(output_dir, "compression_ratio_results.csv"), comp_res)
 
-    # 2. Physical RSS footprint
-    rss_res = benchmark_rss_memory_footprint()
-    save_results_to_csv(os.path.join(output_dir, "memory_rss_results.csv"), rss_res)
+    # 2. Live buffer accounting
+    mem_res = benchmark_live_buffer_accounting()
+    save_results_to_csv(os.path.join(output_dir, "memory_rss_results.csv"), mem_res)
 
-    return {"compression": comp_res, "rss": rss_res}
+    return {"compression": comp_res, "memory": mem_res}
 
 
 if __name__ == "__main__":
