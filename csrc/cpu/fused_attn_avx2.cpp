@@ -17,23 +17,115 @@ static inline float hsum8(__m256 v) {
     return _mm_cvtss_f32(s);
 }
 
+// 8 independent vector accumulators in flight to saturate FMA pipeline
 static inline float dot_avx2(const float* a, const float* b, int n) {
-    __m256 acc = _mm256_setzero_ps();
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    __m256 acc4 = _mm256_setzero_ps();
+    __m256 acc5 = _mm256_setzero_ps();
+    __m256 acc6 = _mm256_setzero_ps();
+    __m256 acc7 = _mm256_setzero_ps();
     int i = 0;
-    for (; i + 8 <= n; i += 8) {
-        __m256 va = _mm256_loadu_ps(a + i);
-        __m256 vb = _mm256_loadu_ps(b + i);
-        acc = _mm256_fmadd_ps(va, vb, acc);
+    for (; i + 64 <= n; i += 64) {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i),      acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),  _mm256_loadu_ps(b + i + 8),  acc1);
+        acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16), acc2);
+        acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24), acc3);
+        acc4 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 32), _mm256_loadu_ps(b + i + 32), acc4);
+        acc5 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 40), _mm256_loadu_ps(b + i + 40), acc5);
+        acc6 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 48), _mm256_loadu_ps(b + i + 48), acc6);
+        acc7 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 56), _mm256_loadu_ps(b + i + 56), acc7);
     }
-    float sum = hsum8(acc);
+    for (; i + 32 <= n; i += 32) {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i),      acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),  _mm256_loadu_ps(b + i + 8),  acc1);
+        acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16), acc2);
+        acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24), acc3);
+    }
+    for (; i + 8 <= n; i += 8) {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), acc0);
+    }
+    acc0 = _mm256_add_ps(acc0, acc1);
+    acc2 = _mm256_add_ps(acc2, acc3);
+    acc4 = _mm256_add_ps(acc4, acc5);
+    acc6 = _mm256_add_ps(acc6, acc7);
+    acc0 = _mm256_add_ps(acc0, acc2);
+    acc4 = _mm256_add_ps(acc4, acc6);
+    acc0 = _mm256_add_ps(acc0, acc4);
+
+    float sum = hsum8(acc0);
     for (; i < n; ++i) sum += a[i] * b[i]; // tail, only if head_dim % 8 != 0
     return sum;
 }
 
-// out[0..n) += scale * x[0..n)
+// out[0..n) += scale * x[0..n) with 8 unrolled vectors
 static inline void axpy_avx2(float* out, const float* x, float scale, int n) {
     __m256 vscale = _mm256_set1_ps(scale);
     int i = 0;
+    for (; i + 64 <= n; i += 64) {
+        __m256 vo0 = _mm256_loadu_ps(out + i);
+        __m256 vx0 = _mm256_loadu_ps(x + i);
+        vo0 = _mm256_fmadd_ps(vx0, vscale, vo0);
+        _mm256_storeu_ps(out + i, vo0);
+
+        __m256 vo1 = _mm256_loadu_ps(out + i + 8);
+        __m256 vx1 = _mm256_loadu_ps(x + i + 8);
+        vo1 = _mm256_fmadd_ps(vx1, vscale, vo1);
+        _mm256_storeu_ps(out + i + 8, vo1);
+
+        __m256 vo2 = _mm256_loadu_ps(out + i + 16);
+        __m256 vx2 = _mm256_loadu_ps(x + i + 16);
+        vo2 = _mm256_fmadd_ps(vx2, vscale, vo2);
+        _mm256_storeu_ps(out + i + 16, vo2);
+
+        __m256 vo3 = _mm256_loadu_ps(out + i + 24);
+        __m256 vx3 = _mm256_loadu_ps(x + i + 24);
+        vo3 = _mm256_fmadd_ps(vx3, vscale, vo3);
+        _mm256_storeu_ps(out + i + 24, vo3);
+
+        __m256 vo4 = _mm256_loadu_ps(out + i + 32);
+        __m256 vx4 = _mm256_loadu_ps(x + i + 32);
+        vo4 = _mm256_fmadd_ps(vx4, vscale, vo4);
+        _mm256_storeu_ps(out + i + 32, vo4);
+
+        __m256 vo5 = _mm256_loadu_ps(out + i + 40);
+        __m256 vx5 = _mm256_loadu_ps(x + i + 40);
+        vo5 = _mm256_fmadd_ps(vx5, vscale, vo5);
+        _mm256_storeu_ps(out + i + 40, vo5);
+
+        __m256 vo6 = _mm256_loadu_ps(out + i + 48);
+        __m256 vx6 = _mm256_loadu_ps(x + i + 48);
+        vo6 = _mm256_fmadd_ps(vx6, vscale, vo6);
+        _mm256_storeu_ps(out + i + 48, vo6);
+
+        __m256 vo7 = _mm256_loadu_ps(out + i + 56);
+        __m256 vx7 = _mm256_loadu_ps(x + i + 56);
+        vo7 = _mm256_fmadd_ps(vx7, vscale, vo7);
+        _mm256_storeu_ps(out + i + 56, vo7);
+    }
+    for (; i + 32 <= n; i += 32) {
+        __m256 vo0 = _mm256_loadu_ps(out + i);
+        __m256 vx0 = _mm256_loadu_ps(x + i);
+        vo0 = _mm256_fmadd_ps(vx0, vscale, vo0);
+        _mm256_storeu_ps(out + i, vo0);
+
+        __m256 vo1 = _mm256_loadu_ps(out + i + 8);
+        __m256 vx1 = _mm256_loadu_ps(x + i + 8);
+        vo1 = _mm256_fmadd_ps(vx1, vscale, vo1);
+        _mm256_storeu_ps(out + i + 8, vo1);
+
+        __m256 vo2 = _mm256_loadu_ps(out + i + 16);
+        __m256 vx2 = _mm256_loadu_ps(x + i + 16);
+        vo2 = _mm256_fmadd_ps(vx2, vscale, vo2);
+        _mm256_storeu_ps(out + i + 16, vo2);
+
+        __m256 vo3 = _mm256_loadu_ps(out + i + 24);
+        __m256 vx3 = _mm256_loadu_ps(x + i + 24);
+        vo3 = _mm256_fmadd_ps(vx3, vscale, vo3);
+        _mm256_storeu_ps(out + i + 24, vo3);
+    }
     for (; i + 8 <= n; i += 8) {
         __m256 vo = _mm256_loadu_ps(out + i);
         __m256 vx = _mm256_loadu_ps(x + i);
@@ -42,6 +134,13 @@ static inline void axpy_avx2(float* out, const float* x, float scale, int n) {
     }
     for (; i < n; ++i) out[i] += scale * x[i];
 }
+
+// Reusable thread-local storage to avoid repeated heap allocation
+static thread_local std::vector<float> tls_scores;
+static thread_local std::vector<float> tls_pbs_k_dequant;
+static thread_local std::vector<float> tls_pbs_v_dequant; 
+static thread_local std::vector<float> tls_row_max;
+static thread_local std::vector<float> tls_row_sum_exp;
 
 void fused_attention_decode_avx2(
     const float* Q,
@@ -69,40 +168,55 @@ void fused_attention_decode_avx2(
     const int gqa_ratio     = (num_kv_heads > 0) ? (num_q_heads / num_kv_heads) : 1;
 
     // Allocate score matrix: [num_q_heads, total_tokens]
-    std::vector<float> scores(static_cast<size_t>(num_q_heads) * total_tokens);
+    size_t req_scores = static_cast<size_t>(num_q_heads) * total_tokens;
+    if (tls_scores.size() < req_scores) {
+        tls_scores.resize(req_scores);
+    }
+    float* scores = tls_scores.data();
 
     // Dequantize PBS K and V blocks in parallel if num_blocks > 0
-    std::vector<float> pbs_k_dequant;
-    std::vector<float> pbs_v_dequant;
+    float* pbs_k_dequant_ptr = nullptr;
+    float* pbs_v_dequant_ptr = nullptr;
 
     if (num_blocks > 0) {
-        pbs_k_dequant.resize(static_cast<size_t>(total_pbs) * num_kv_heads * head_dim);
-        pbs_v_dequant.resize(static_cast<size_t>(total_pbs) * num_kv_heads * head_dim);
+        size_t req_pbs_elems = static_cast<size_t>(total_pbs) * num_kv_heads * head_dim;
+        if (tls_pbs_k_dequant.size() < req_pbs_elems) {
+            tls_pbs_k_dequant.resize(req_pbs_elems);
+        }
+        if (tls_pbs_v_dequant.size() < req_pbs_elems) {
+            tls_pbs_v_dequant.resize(req_pbs_elems);
+        }
+        pbs_k_dequant_ptr = tls_pbs_k_dequant.data();
+        pbs_v_dequant_ptr = tls_pbs_v_dequant.data();
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(dynamic, 1)
         for (int b = 0; b < num_blocks; ++b) {
             dequantize_k_avx2(
                 PBS_K_Packed + static_cast<size_t>(b) * num_kv_heads * head_dim,
                 PBS_K_Scales + static_cast<size_t>(b) * num_kv_heads * head_dim,
                 PBS_K_Zeroes + static_cast<size_t>(b) * num_kv_heads * head_dim,
-                pbs_k_dequant.data() + static_cast<size_t>(b) * 16 * num_kv_heads * head_dim,
+                pbs_k_dequant_ptr + static_cast<size_t>(b) * 16 * num_kv_heads * head_dim,
                 /*num_blocks=*/1, num_kv_heads, head_dim);
 
             dequantize_v_avx2(
                 PBS_V_Packed + static_cast<size_t>(b) * 16 * num_kv_heads * ((head_dim + 15) / 16),
                 PBS_V_Scales + static_cast<size_t>(b) * 16 * num_kv_heads,
                 PBS_V_Zeroes + static_cast<size_t>(b) * 16 * num_kv_heads,
-                pbs_v_dequant.data() + static_cast<size_t>(b) * 16 * num_kv_heads * head_dim,
+                pbs_v_dequant_ptr + static_cast<size_t>(b) * 16 * num_kv_heads * head_dim,
                 /*total_tokens=*/16, num_kv_heads, head_dim);
         }
     }
 
     // Softmax stats per query head
-    std::vector<float> row_max(num_q_heads, NEG_INF);
-    std::vector<float> row_sum_exp(num_q_heads, 0.0f);
+    if (tls_row_max.size() < static_cast<size_t>(num_q_heads)) {
+        tls_row_max.resize(num_q_heads);
+        tls_row_sum_exp.resize(num_q_heads);
+    }
+    float* row_max = tls_row_max.data();
+    float* row_sum_exp = tls_row_sum_exp.data();
 
     // ---------------- Parallel execution across Query Heads ----------------
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 1)
     for (int h = 0; h < num_q_heads; ++h) {
         int kv_h = (gqa_ratio > 1) ? (h / gqa_ratio) : h;
         const float* q = Q + h * head_dim;
@@ -121,7 +235,7 @@ void fused_attention_decode_avx2(
                 if (PBS_token_ids[b * 16 + t] == -1) {
                     head_scores[global_idx] = NEG_INF;
                 } else {
-                    const float* k = pbs_k_dequant.data() + (static_cast<size_t>(b * 16 + t) * num_kv_heads + kv_h) * head_dim;
+                    const float* k = pbs_k_dequant_ptr + (static_cast<size_t>(b * 16 + t) * num_kv_heads + kv_h) * head_dim;
                     head_scores[global_idx] = dot_avx2(q, k, head_dim) * inv_sqrt_hd;
                 }
             }
@@ -160,7 +274,7 @@ void fused_attention_decode_avx2(
                 if (PBS_token_ids[b * 16 + t] == -1) continue;
                 int global_idx = dense_count + b * 16 + t;
                 float w = std::exp(head_scores[global_idx] - mx) * inv_sum;
-                const float* v = pbs_v_dequant.data() + (static_cast<size_t>(b * 16 + t) * num_kv_heads + kv_h) * head_dim;
+                const float* v = pbs_v_dequant_ptr + (static_cast<size_t>(b * 16 + t) * num_kv_heads + kv_h) * head_dim;
                 axpy_avx2(out_h, v, w, head_dim);
             }
         }
@@ -168,7 +282,7 @@ void fused_attention_decode_avx2(
 
     // Mean attention weights across heads for global scoring feedback
     if (mean_attn_weights) {
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(dynamic, 1)
         for (int i = 0; i < total_tokens; ++i) {
             float sum_w = 0.0f;
             for (int h = 0; h < num_q_heads; ++h) {

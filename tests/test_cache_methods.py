@@ -17,8 +17,8 @@ import torch
 import pytest
 from unittest.mock import MagicMock
 
-from tri_tier.cache import TriTierCache
-from tri_tier.constants import UPDATE_THRESHOLD, CHUNK_SIZE, SINK_SIZE
+from src.tri_tier.cache import TriTierCache
+from src.tri_tier.constants import UPDATE_THRESHOLD, CHUNK_SIZE, SINK_SIZE
 
 MAX_SEQ_LEN = 128
 HEAD_DIM = 16

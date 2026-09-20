@@ -9,15 +9,15 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
     LlamaForCausalLM,
 )
-from tri_tier.integration.patch_llama import (
+from src.tri_tier.integration.patch_llama import (
     apply_patch,
     patched_forward,
     MAX_SEQ_LEN,
     R_SIZE,
     H_RATIO,
 )
-from tri_tier.cache import TriTierCache
-from tri_tier.constants import SINK_SIZE, CHUNK_SIZE
+from src.tri_tier.cache import TriTierCache
+from src.tri_tier.constants import SINK_SIZE, CHUNK_SIZE
 
 
 @pytest.fixture(autouse=True)
@@ -62,14 +62,16 @@ class TestInputAssertions:
         with pytest.raises(AssertionError, match="TriTierCache only supports batch_size=1"):
             layer(hidden_states, position_embeddings=(cos, sin))
 
-    def test_seq_len_greater_than_one_raises_assertion(self):
+    def test_batched_prefill_execution(self):
         layer, rotary_emb, config = create_llama_attention()
         hidden_states = torch.randn(1, 4, config.hidden_size)  # q_len = 4
         pos_ids = torch.tensor([[0, 1, 2, 3]])
         cos, sin = rotary_emb(hidden_states, pos_ids)
 
-        with pytest.raises(AssertionError, match="TriTierCache only supports one new token per forward call"):
-            layer(hidden_states, position_embeddings=(cos, sin))
+        output, attn_weights = layer(hidden_states, position_embeddings=(cos, sin))
+        assert output.shape == (1, 4, config.hidden_size)
+        assert not torch.isnan(output).any()
+        assert layer.tri_tier_cache.Total_Processed_Tokens == 4
 
 
 class TestLazyCacheInitialization:

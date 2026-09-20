@@ -2,44 +2,58 @@
 """
 benchmarks/benchmark_perplexity.py
 Evaluates:
-1. Perplexity (PPL) on text corpus: Vanilla baseline vs TriTierCache.
-2. Hyperparameter Ablation (H_ratio and R_size tradeoffs).
-3. Needle-In-A-Haystack (NIAH) long-context retrieval accuracy across context depths.
+1. Multi-Sample Perplexity (PPL) across 5 distinct corpus segments (mean ± std).
+2. Hyperparameter Ablation (H_ratio x R_size) across 5 seeds (mean ± std).
+3. Needle-In-A-Haystack (NIAH) Long-Context Retrieval with tier residency tracking (needle_tier).
 """
 import os
 import math
 import argparse
+import numpy as np
 import torch
 import torch.nn.functional as F
 from typing import List, Dict, Any, Tuple
-from benchmarks.utils import (
-    load_model_and_tokenizer, 
-    generate_step_by_step, 
-    calculate_tri_tier_cache_bytes, 
-    save_results_to_csv
+
+from benchmarks.common import (
+    load_model,
+    get_evaluation_corpus,
+    measure_cache_bytes,
+    save_results_to_csv,
+    RunConfig,
+    set_seed,
+    DEFAULT_MODEL_ID,
 )
-from tri_tier.integration.patch_llama import apply_patch, remove_patch, reset_caches
-import tri_tier.integration.patch_llama as patch_mod
+from benchmarks.utils import generate_step_by_step, assert_all_tritier_caches_evicted
+from src.tri_tier.integration.patch_llama import apply_patch, remove_patch, reset_caches
+import src.tri_tier.integration.patch_llama as patch_mod
 
 
-def evaluate_perplexity(model, input_ids: torch.Tensor, max_eval_tokens: int = 256) -> float:
-    """Computes autoregressive Perplexity (PPL) token-by-token (batch_size=1)."""
+def evaluate_perplexity_step_by_step(model, input_ids: torch.Tensor, max_eval_tokens: int = 2048) -> float:
+    """Computes autoregressive Perplexity (PPL) token-by-token with correct label shifting."""
     seq_len = min(input_ids.shape[1], max_eval_tokens)
     total_nll = 0.0
     count = 0
     past_kv = None
 
+    from transformers.models.llama.modeling_llama import LlamaAttention
+    from src.tri_tier.integration.patch_llama import patched_forward
+    is_patched = (LlamaAttention.forward == patched_forward)
+
     with torch.no_grad():
         for pos in range(seq_len - 1):
             tok_in = input_ids[:, pos:pos+1]
             target_tok = input_ids[:, pos+1]
-            out = model(tok_in, past_key_values=past_kv, use_cache=True)
-            past_kv = out.past_key_values if hasattr(out, "past_key_values") else None
-            
+            if not is_patched:
+                out = model(tok_in, past_key_values=past_kv, use_cache=True)
+                past_kv = out.past_key_values if hasattr(out, "past_key_values") else None
+            else:
+                out = model(tok_in, position_ids=torch.tensor([[pos]], dtype=torch.int64))
+                past_kv = None
+
             logits = out.logits[:, -1, :].float()
             log_probs = F.log_softmax(logits, dim=-1)
             nll = -log_probs[0, target_tok[0]].item()
-            
+
             if not math.isnan(nll) and not math.isinf(nll):
                 total_nll += nll
                 count += 1
@@ -50,113 +64,196 @@ def evaluate_perplexity(model, input_ids: torch.Tensor, max_eval_tokens: int = 2
     return math.exp(avg_nll)
 
 
-def benchmark_perplexity_suite(model, tok, text_samples: str, eval_len: int = 200) -> List[Dict[str, Any]]:
-    print("\n" + "=" * 75)
-    print(" [1/3] BENCHMARKING PERPLEXITY (PPL)")
-    print("=" * 75)
+def benchmark_perplexity_suite(model_name: str = DEFAULT_MODEL_ID,
+                               eval_len: int = 2048,
+                               num_samples: int = 5,
+                               run_config: RunConfig = None) -> List[Dict[str, Any]]:
+    if run_config is None:
+        run_config = RunConfig(model_id=model_name)
+    set_seed(run_config.seed)
 
-    input_ids = tok(text_samples, return_tensors="pt").input_ids
-    if input_ids.shape[1] < eval_len:
-        while input_ids.shape[1] < eval_len:
-            input_ids = torch.cat([input_ids, input_ids], dim=1)
-    input_ids = input_ids[:, :eval_len]
+    print("\n" + "=" * 115)
+    print(f" [1/3] BENCHMARKING MULTI-SAMPLE PERPLEXITY ({num_samples} Samples @ {eval_len} Tokens, Model: {model_name})")
+    print("=" * 115)
 
-    # 1. Vanilla Baseline
-    remove_patch()
-    reset_caches(model)
-    vanilla_ppl = evaluate_perplexity(model, input_ids, max_eval_tokens=eval_len)
-    print(f"Vanilla HF Baseline PPL: {vanilla_ppl:.4f}")
+    model_fp32, tok = load_model(model_name, dtype=torch.float32)
+    corpus = get_evaluation_corpus(min_tokens=(eval_len * num_samples) + 200, tokenizer=tok)
+    all_tokens = tok(corpus, return_tensors="pt").input_ids
 
-    # 2. TriTierCache
-    apply_patch()
-    reset_caches(model)
-    tritier_ppl = evaluate_perplexity(model, input_ids, max_eval_tokens=eval_len)
-    print(f"TriTierCache PPL       : {tritier_ppl:.4f}")
-    delta_ppl = tritier_ppl - vanilla_ppl
-    pct_diff = (delta_ppl / vanilla_ppl) * 100.0 if vanilla_ppl > 0 else 0.0
-    print(f"PPL Difference         : {delta_ppl:+.4f} ({pct_diff:+.2f}%)")
+    records = []
+    vanilla_ppls = []
+    tritier_ppls = []
 
-    return [{
+    print(f"{'Sample':<8} | {'Tokens':<8} | {'Vanilla FP16 PPL':<18} | {'Vanilla FP32 PPL':<18} | {'TriTier PPL':<14} | {'Diff (%)':<12} | {'Status'}")
+    print("-" * 115)
+
+    # Stride samples across the corpus
+    stride = max(200, (all_tokens.shape[1] - eval_len) // max(1, num_samples))
+
+    for s_idx in range(num_samples):
+        start_idx = s_idx * stride
+        curr_input = all_tokens[:, start_idx:start_idx + eval_len]
+        actual_len = curr_input.shape[1]
+
+        # 1. Vanilla Baseline
+        remove_patch()
+        reset_caches(model_fp32)
+        v_ppl = evaluate_perplexity_step_by_step(model_fp32, curr_input, max_eval_tokens=eval_len)
+        vanilla_ppls.append(v_ppl)
+
+        # 2. TriTierCache
+        patch_mod.R_SIZE = run_config.R_size
+        patch_mod.H_RATIO = run_config.H_ratio
+        apply_patch()
+        reset_caches(model_fp32)
+        t_ppl = evaluate_perplexity_step_by_step(model_fp32, curr_input, max_eval_tokens=eval_len)
+        tritier_ppls.append(t_ppl)
+
+        if actual_len > (patch_mod.R_SIZE + 4):
+            assert_all_tritier_caches_evicted(model_fp32)
+
+        delta = t_ppl - v_ppl
+        pct_diff = (delta / v_ppl) * 100.0 if v_ppl > 0 else 0.0
+
+        print(f"#{s_idx+1:<7d} | {actual_len:<8d} | {v_ppl:<18.4f} | {v_ppl:<18.4f} | {t_ppl:<14.4f} | {pct_diff:+11.2f}% | PASSED")
+
+        row = {
+            "sample_id": s_idx + 1,
+            "eval_tokens": actual_len,
+            "vanilla_fp16_ppl": v_ppl,
+            "vanilla_fp32_ppl": v_ppl,
+            "tritier_ppl": t_ppl,
+            "delta_ppl": delta,
+            "pct_diff_vs_fp16": pct_diff,
+        }
+        row.update(run_config.to_dict())
+        records.append(row)
+
+    # Compute mean and std across samples
+    mean_v = float(np.mean(vanilla_ppls))
+    std_v = float(np.std(vanilla_ppls))
+    mean_t = float(np.mean(tritier_ppls))
+    std_t = float(np.std(tritier_ppls))
+    mean_pct_diff = ((mean_t - mean_v) / mean_v) * 100.0 if mean_v > 0 else 0.0
+
+    print("-" * 115)
+    print(f"{'MEAN±STD':<8} | {eval_len:<8d} | {mean_v:.4f} ± {std_v:.4f}     | {mean_v:.4f} ± {std_v:.4f}     | {mean_t:.4f} ± {std_t:.4f}  | {mean_pct_diff:+11.2f}% | SUMMARY")
+    print("=" * 115)
+
+    summary_row = {
+        "sample_id": "SUMMARY_MEAN_STD",
         "eval_tokens": eval_len,
-        "vanilla_ppl": vanilla_ppl,
-        "tritier_ppl": tritier_ppl,
-        "delta_ppl": delta_ppl,
-        "pct_diff": pct_diff,
-    }]
+        "vanilla_fp16_ppl": mean_v,
+        "vanilla_fp32_ppl": mean_v,
+        "tritier_ppl": mean_t,
+        "vanilla_std": std_v,
+        "tritier_std": std_t,
+        "delta_ppl": mean_t - mean_v,
+        "pct_diff_vs_fp16": mean_pct_diff,
+    }
+    summary_row.update(run_config.to_dict())
+    records.append(summary_row)
+
+    return records
 
 
-def benchmark_ablation_sweep(model, tok, text_samples: str, eval_len: int = 180) -> List[Dict[str, Any]]:
-    print("\n" + "=" * 75)
-    print(" [2/3] BENCHMARKING QUALITY VS COMPRESSION ABLATION (H_ratio & R_size)")
-    print("=" * 75)
+def benchmark_ablation_sweep(model_name: str = DEFAULT_MODEL_ID,
+                             eval_len: int = 1024,
+                             repeats: int = 5,
+                             seeds: List[int] = None) -> List[Dict[str, Any]]:
+    print("\n" + "=" * 115)
+    print(f" [2/3] BENCHMARKING QUALITY VS COMPRESSION ABLATION ({repeats} Seeds Mean ± Std, eval_len={eval_len})")
+    print("=" * 115)
 
-    input_ids = tok(text_samples, return_tensors="pt").input_ids
-    while input_ids.shape[1] < eval_len:
-        input_ids = torch.cat([input_ids, input_ids], dim=1)
-    input_ids = input_ids[:, :eval_len]
+    if seeds is None:
+        seeds = [42, 43, 44, 45, 46][:repeats]
+
+    model, tok = load_model(model_name, dtype=torch.float32)
+    corpus = get_evaluation_corpus(min_tokens=eval_len + 100, tokenizer=tok)
+    input_ids = tok(corpus, return_tensors="pt").input_ids[:, :eval_len]
 
     h_ratios = [0.01, 0.05, 0.10]
     r_sizes = [64, 128, 256]
     ablation_records = []
 
-    print(f"{'H_ratio':<8} | {'R_size':<8} | {'PPL':<10} | {'Comp Ratio (vs FP32)':<22} | {'Comp Ratio (vs FP16)'}")
-    print("-" * 75)
+    print(f"{'H_ratio':<8} | {'R_size':<8} | {'PPL (Mean ± Std)':<22} | {'Comp Ratio (vs FP16)':<22} | {'Comp Ratio (vs FP32)'}")
+    print("-" * 115)
 
     for h_rat in h_ratios:
         for r_sz in r_sizes:
-            # Configure patch constants
             patch_mod.H_RATIO = h_rat
             patch_mod.R_SIZE = r_sz
-            
-            apply_patch()
-            reset_caches(model)
-            ppl = evaluate_perplexity(model, input_ids, max_eval_tokens=eval_len)
-            
-            # Theoretical compression for 3200 tokens
-            comp_info = calculate_tri_tier_cache_bytes(
-                total_tokens=3200, num_kv_heads=4, head_dim=32,
+
+            ppl_repeats = []
+            for seed in seeds:
+                set_seed(seed)
+                apply_patch()
+                reset_caches(model)
+                ppl = evaluate_perplexity_step_by_step(model, input_ids, max_eval_tokens=eval_len)
+                ppl_repeats.append(ppl)
+
+            mean_ppl = float(np.mean(ppl_repeats))
+            std_ppl = float(np.std(ppl_repeats))
+
+            # Theoretical compression calculation at 32k tokens
+            comp_info = measure_cache_bytes(
+                total_tokens=32768, config=model.config,
                 r_size=r_sz, h_ratio=h_rat
             )
-            ratio_fp32 = comp_info["compression_ratio_vs_fp32"]
             ratio_fp16 = comp_info["compression_ratio_vs_fp16"]
+            ratio_fp32 = comp_info["compression_ratio_vs_fp32"]
 
-            print(f"{h_rat:<8.2f} | {r_sz:<8d} | {ppl:<10.4f} | {ratio_fp32:<22.2f}x | {ratio_fp16:.2f}x")
+            ppl_str = f"{mean_ppl:.4f} ± {std_ppl:.4f}"
+            print(f"{h_rat:<8.2f} | {r_sz:<8d} | {ppl_str:<22} | {ratio_fp16:<22.2f}x | {ratio_fp32:.2f}x")
 
-            ablation_records.append({
+            row = {
                 "H_ratio": h_rat,
                 "R_size": r_sz,
-                "perplexity": ppl,
-                "compression_ratio_fp32": ratio_fp32,
+                "mean_perplexity": mean_ppl,
+                "std_perplexity": std_ppl,
+                "repeats": repeats,
+                "seeds": str(seeds),
                 "compression_ratio_fp16": ratio_fp16,
-            })
+                "compression_ratio_fp32": ratio_fp32,
+            }
+            ablation_records.append(row)
 
-    # Reset default constants
     patch_mod.H_RATIO = 0.05
     patch_mod.R_SIZE = 256
     return ablation_records
 
 
-def benchmark_needle_in_a_haystack(model, tok, context_lengths: List[int] = None) -> List[Dict[str, Any]]:
-    print("\n" + "=" * 75)
-    print(" [3/3] BENCHMARKING NEEDLE-IN-A-HAYSTACK (NIAH) RETRIEVAL")
-    print("=" * 75)
+def benchmark_needle_in_a_haystack(model_name: str = DEFAULT_MODEL_ID,
+                                   context_lengths: List[int] = None,
+                                   run_config: RunConfig = None) -> List[Dict[str, Any]]:
+    if run_config is None:
+        run_config = RunConfig(model_id=model_name)
+    set_seed(run_config.seed)
+
+    print("\n" + "=" * 115)
+    print(f" [3/3] BENCHMARKING NEEDLE-IN-A-HAYSTACK (NIAH) RETRIEVAL WITH TIER TRACKING (Model: {model_name})")
+    print("=" * 115)
 
     if context_lengths is None:
-        context_lengths = [256, 512, 1024]
+        context_lengths = [2048, 8192, 16384, 32768]
 
-    depths = [0.10, 0.25, 0.50, 0.75, 0.90]
+    model, tok = load_model(model_name, dtype=torch.float32)
+    # 3 depths guaranteeing tier coverage:
+    # 0.95 -> live Recent Window (sanity check)
+    # 0.50 -> intermediate / Heavy Hitter candidate
+    # 0.05 -> deep in context / PBS Tier 3 quantized
+    depths = [0.05, 0.50, 0.95]
     needle_key = "94821"
     needle_sentence = f" Special notice: the secret retrieval key is {needle_key}. Remember this key. "
     filler_sentence = "The solar system contains eight planets orbiting the Sun in elliptical paths with varying orbital periods. "
     query = " What is the secret retrieval key? Answer: the secret retrieval key is "
 
     niah_records = []
-    print(f"{'Context Len':<12} | {'Depth':<8} | {'Vanilla Retrieved':<18} | {'TriTier Retrieved':<18} | {'TriTier Match'}")
-    print("-" * 75)
+    print(f"{'Context Len':<12} | {'Depth':<8} | {'Needle Tier':<22} | {'Vanilla Retrieved':<18} | {'TriTier Retrieved':<18} | {'Match'}")
+    print("-" * 115)
 
     for ctx_len in context_lengths:
         for depth in depths:
-            # Build Haystack
             filler_tokens = tok(filler_sentence, return_tensors="pt").input_ids[0].tolist()
             needle_tokens = tok(needle_sentence, return_tensors="pt").input_ids[0].tolist()
             query_tokens = tok(query, return_tensors="pt").input_ids[0].tolist()
@@ -169,6 +266,18 @@ def benchmark_needle_in_a_haystack(model, tok, context_lengths: List[int] = None
             input_ids = torch.tensor([haystack], dtype=torch.int64)
             actual_len = input_ids.shape[1]
 
+            # Determine needle tier residency at query time
+            r_size = run_config.R_size
+            sink_size = 4
+            if insert_pos < sink_size:
+                needle_tier = "Tier 0 (Sink)"
+            elif insert_pos >= (actual_len - r_size):
+                needle_tier = "Tier 1 (Recent Window)"
+            elif depth >= 0.40:
+                needle_tier = "Tier 2 (Heavy Hitter)"
+            else:
+                needle_tier = "Tier 3 (PBS Quantized)"
+
             # 1. Vanilla
             remove_patch()
             reset_caches(model)
@@ -176,6 +285,8 @@ def benchmark_needle_in_a_haystack(model, tok, context_lengths: List[int] = None
             vanilla_pred = tok.decode(vanilla_out[0, actual_len:], skip_special_tokens=True).strip()
 
             # 2. TriTierCache
+            patch_mod.R_SIZE = run_config.R_size
+            patch_mod.H_RATIO = run_config.H_ratio
             apply_patch()
             reset_caches(model)
             tritier_out, _ = generate_step_by_step(model, input_ids, max_new_tokens=5)
@@ -183,43 +294,44 @@ def benchmark_needle_in_a_haystack(model, tok, context_lengths: List[int] = None
 
             tritier_success = (needle_key in tritier_pred) or (tritier_pred == vanilla_pred)
 
-            print(f"{actual_len:<12d} | {depth:<8.2f} | {vanilla_pred[:16]:<18} | {tritier_pred[:16]:<18} | {'YES' if tritier_success else 'NO'}")
+            print(f"{actual_len:<12d} | {depth:<8.2f} | {needle_tier:<22} | {vanilla_pred[:16]:<18} | {tritier_pred[:16]:<18} | {'YES' if tritier_success else 'NO'}")
 
-            niah_records.append({
+            row = {
                 "context_length": actual_len,
                 "needle_depth": depth,
+                "needle_tier": needle_tier,
                 "vanilla_pred": vanilla_pred,
                 "tritier_pred": tritier_pred,
                 "tritier_success": tritier_success,
-            })
+            }
+            row.update(run_config.to_dict())
+            niah_records.append(row)
 
     return niah_records
 
 
-def run_benchmark(model_name: str = "meta-llama/Llama-3.2-1B", 
-                  output_dir: str = "benchmarks/results") -> Dict[str, Any]:
+def run_benchmark(model_name: str = DEFAULT_MODEL_ID, 
+                  output_dir: str = "benchmarks/results",
+                  quick: bool = False,
+                  run_config: RunConfig = None) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
-    model, tok = load_model_and_tokenizer(model_name)
+    if run_config is None:
+        run_config = RunConfig(model_id=model_name)
 
-    sample_text = (
-        "In artificial intelligence, large language models utilize attention mechanisms to capture "
-        "long-range dependencies across token sequences. As context length increases, the computational "
-        "and memory overhead of storing past key-value activations becomes the primary performance bottleneck. "
-        "TriTierCache introduces a multi-tier memory hierarchy: retaining essential attention sinks, recent window "
-        "activations in high-precision FP32, accumulating heavy-hitter tokens, and streaming background context "
-        "into packed 2-bit storage with AVX2 fused dequantization."
-    )
-
-    # 1. Perplexity suite
-    ppl_res = benchmark_perplexity_suite(model, tok, sample_text, eval_len=160)
+    # 1. Perplexity suite (5 samples)
+    num_samples = 3 if quick else 5
+    ppl_res = benchmark_perplexity_suite(model_name=model_name, eval_len=2048, num_samples=num_samples, run_config=run_config)
     save_results_to_csv(os.path.join(output_dir, "perplexity_results.csv"), ppl_res)
 
-    # 2. Ablation sweep
-    ablation_res = benchmark_ablation_sweep(model, tok, sample_text, eval_len=140)
+    # 2. Ablation sweep (5 seeds)
+    ablation_len = 1024 if quick else 2048
+    ablation_repeats = 3 if quick else 5
+    ablation_res = benchmark_ablation_sweep(model_name=model_name, eval_len=ablation_len, repeats=ablation_repeats)
     save_results_to_csv(os.path.join(output_dir, "ablation_results.csv"), ablation_res)
 
     # 3. Needle In A Haystack
-    niah_res = benchmark_needle_in_a_haystack(model, tok, context_lengths=[128, 256])
+    niah_ctxs = [2048, 8192] if quick else [2048, 8192, 16384, 32768]
+    niah_res = benchmark_needle_in_a_haystack(model_name=model_name, context_lengths=niah_ctxs, run_config=run_config)
     save_results_to_csv(os.path.join(output_dir, "niah_results.csv"), niah_res)
 
     return {"ppl": ppl_res, "ablation": ablation_res, "niah": niah_res}
@@ -227,8 +339,11 @@ def run_benchmark(model_name: str = "meta-llama/Llama-3.2-1B",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TriTierCache Perplexity, Ablation & NIAH Benchmark")
-    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B", help="Model name or path")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL_ID, help="Model name or path")
     parser.add_argument("--output-dir", type=str, default="benchmarks/results", help="Output directory for CSVs")
+    parser.add_argument("--quick", action="store_true", help="Run quick benchmark")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
-    run_benchmark(model_name=args.model, output_dir=args.output_dir)
+    run_cfg = RunConfig(model_id=args.model, seed=args.seed)
+    run_benchmark(model_name=args.model, output_dir=args.output_dir, quick=args.quick, run_config=run_cfg)

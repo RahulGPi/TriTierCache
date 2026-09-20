@@ -642,45 +642,6 @@ wheels = [
 ]
 
 [[package]]
-name = "idk-what-to-name-this"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "accelerate" },
-    { name = "datasets" },
-    { name = "ninja" },
-    { name = "numpy" },
-    { name = "psutil" },
-    { name = "pybind11" },
-    { name = "sentencepiece" },
-    { name = "setuptools" },
-    { name = "torch" },
-    { name = "transformers" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", specifier = ">=1.14.0" },
-    { name = "datasets", specifier = ">=5.0.1" },
-    { name = "ninja", specifier = ">=1.13.0" },
-    { name = "numpy", specifier = ">=2.5.2" },
-    { name = "psutil", specifier = ">=7.2.2" },
-    { name = "pybind11", specifier = ">=3.1.0" },
-    { name = "sentencepiece", specifier = ">=0.2.2" },
-    { name = "setuptools", specifier = ">=84.0.0" },
-    { name = "torch", specifier = ">=2.13.0" },
-    { name = "transformers", specifier = ">=5.16.1" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.1.1" }]
-
-[[package]]
 name = "idna"
 version = "3.19"
 source = { registry = "https://pypi.org/simple" }
@@ -1812,6 +1773,45 @@ sdist = { url = "https://files.pythonhosted.org/packages/ad/2e/ba418680ab901dae2
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0d/4d/ee3728674c0bbc637bb4af88ccf0be697f92e4e90b55f5dc110c44d61b61/transformers-5.16.1-py3-none-any.whl", hash = "sha256:2f2d5b98a5ad3718713653734298fa620754ed683702a635ebb587df3ed29c7e", size = 12080592, upload-time = "2026-08-26T14:48:55.083Z" },
 ]
+
+[[package]]
+name = "tri-tier"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "accelerate" },
+    { name = "datasets" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "psutil" },
+    { name = "pybind11" },
+    { name = "sentencepiece" },
+    { name = "setuptools" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", specifier = ">=1.14.0" },
+    { name = "datasets", specifier = ">=5.0.1" },
+    { name = "ninja", specifier = ">=1.13.0" },
+    { name = "numpy", specifier = ">=2.5.2" },
+    { name = "psutil", specifier = ">=7.2.2" },
+    { name = "pybind11", specifier = ">=3.1.0" },
+    { name = "sentencepiece", specifier = ">=0.2.2" },
+    { name = "setuptools", specifier = ">=84.0.0" },
+    { name = "torch", specifier = ">=2.13.0" },
+    { name = "transformers", specifier = ">=5.16.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "triton"

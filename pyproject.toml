@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tri_tier"
 version = "0.1.0"
-description = "Add your description here"
+description = "Tri Tier Cache system to reduce memory usage in longer contexts"
 readme = "README.md"
 authors = [
     { name = "RahulGPi", email = "rahulgpai99@gmail.com" }
@@ -25,10 +25,12 @@ dependencies = [
 ]
 
 [project.scripts]
-idk-what-to-name-this = "idk_what_to_name_this:main"
+idk-what-to-name-this = "tri_tier.cli:main"
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
 ]
 
+[tool.setuptools.packages.find]
+where = ["src"]
