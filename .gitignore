@@ -7,6 +7,7 @@ wheels/
 *.egg-info/
 .pytest_cache/
 
+*.sh
 # Virtual environments
 .venv/
 env/
@@ -26,6 +27,8 @@ venv/
 *.out
 *.exe
 *.app
+microbench
+*microbench*
 /test_*
 test_quantize_*
 test_quantise_*
