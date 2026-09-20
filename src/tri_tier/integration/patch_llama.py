@@ -13,6 +13,7 @@ except ImportError:
 MAX_SEQ_LEN = 32768
 R_SIZE = 256
 H_RATIO = 0.05
+SCORE_DECAY = 0.999
 
 
 def _reference_attention_path(self, cache: TriTierCache, Q: torch.Tensor, num_q_heads: int, num_kv_heads: int, head_dim: int):
@@ -62,6 +63,7 @@ def patched_forward(self,
             R_size=R_SIZE,
             H_ratio=H_RATIO,
             num_q_heads=num_q_heads,
+            score_decay=SCORE_DECAY,
         )
     cache = self.tri_tier_cache
 

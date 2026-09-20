@@ -19,7 +19,8 @@ from benchmarks import (
     benchmark_latency,
     benchmark_memory,
 )
-from benchmarks.utils import save_results_to_csv, DEFAULT_MODEL_ID
+from benchmarks.common import RunConfig, DEFAULT_MODEL_ID, save_results_to_csv
+from benchmarks.generate_report import generate_consolidated_report
 
 
 def print_banner(title: str):
@@ -35,10 +36,13 @@ def main():
     parser.add_argument("--suite", type=str, choices=["all", "correctness", "perplexity", "latency", "memory"], default="all",
                         help="Specific benchmark suite to run (default: all)")
     parser.add_argument("--quick", action="store_true", help="Run in fast mode with smaller sequence counts")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     t_start = time.perf_counter()
+
+    run_cfg = RunConfig(model_id=args.model, seed=args.seed)
 
     print_banner(f"Starting TriTierCache Benchmark Suite: Model={args.model}")
     summary_rows: List[Dict[str, Any]] = []
@@ -50,6 +54,7 @@ def main():
             model_name=args.model,
             output_dir=args.output_dir,
             quick=args.quick,
+            run_config=run_cfg,
         )
         avg_match = sum(r["agreement_percentage"] for r in corr_out["token_match"]) / len(corr_out["token_match"])
         avg_cos_sim = sum(r["cosine_similarity"] for r in corr_out["drift"]) / len(corr_out["drift"])
@@ -71,6 +76,7 @@ def main():
             model_name=args.model,
             output_dir=args.output_dir,
             quick=args.quick,
+            run_config=run_cfg,
         )
         p_row = ppl_out["ppl"][0]
         summary_rows.append({
@@ -96,6 +102,7 @@ def main():
             model_name=args.model,
             output_dir=args.output_dir,
             quick=args.quick,
+            run_config=run_cfg,
         )
         mean_tt_lat = sum(r["tritier_latency_ms"] for r in lat_out["latency"]) / len(lat_out["latency"])
         mean_vn_lat = sum(r["vanilla_latency_ms"] for r in lat_out["latency"]) / len(lat_out["latency"])
@@ -120,7 +127,9 @@ def main():
     if args.suite in ["all", "memory"]:
         print_banner("Running Suite 4: Memory Footprint & Compression Curves")
         mem_out = benchmark_memory.run_benchmark(
+            model_id=args.model,
             output_dir=args.output_dir,
+            run_config=run_cfg,
         )
         r256 = next((r for r in mem_out["compression"] if r["context_length"] == 256), mem_out["compression"][0])
         r32k = next((r for r in mem_out["compression"] if r["context_length"] == 32768), mem_out["compression"][-1])
@@ -150,6 +159,8 @@ def main():
     print(f"Total Execution Time: {t_total:.2f} seconds")
     print(f"All CSV results saved to: '{os.path.abspath(args.output_dir)}/'")
     print("=" * 90 + "\n")
+
+    generate_consolidated_report(results_dir=args.output_dir)
 
 
 if __name__ == "__main__":

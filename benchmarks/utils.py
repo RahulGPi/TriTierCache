@@ -135,65 +135,8 @@ def load_model_and_tokenizer(model_name_or_path: str = DEFAULT_MODEL_ID,
 
 def get_evaluation_corpus(min_tokens: int = 2048, tokenizer=None) -> str:
     """Provides rich, non-repeating natural text corpus for perplexity and correctness benchmarks."""
-    sample_paragraphs = [
-        "Computational complexity theory classifies computational problems according to their inherent difficulty and resource consumption.",
-        "A decision problem is a problem where the output for each instance is binary, corresponding to formal language membership.",
-        "The complexity class P consists of all languages decidable by a deterministic Turing machine in polynomial time O(n^k).",
-        "The complexity class NP encompasses languages verifiable by a deterministic Turing machine in polynomial time given a certificate.",
-        "Cook and Levin independently proved that the Boolean satisfiability problem (SAT) is NP-complete under polynomial-time reductions.",
-        "In cryptographic engineering, asymmetric key protocols rely on computationally hard problems like discrete logarithms and integer factorization.",
-        "The RSA cryptosystem secures communication channels by exploiting the algebraic properties of modular exponentiation in composite rings.",
-        "Elliptic curve cryptography achieves equivalent cryptographic security margins with significantly shorter key lengths than traditional schemes.",
-        "Relational database management systems guarantee transactional durability and atomicity through write-ahead logging and two-phase locking protocols.",
-        "Distributed database architectures implement Paxos or Raft consensus state machines to ensure linearizable replication across unreliable networks.",
-        "Modern microprocessor designs incorporate speculative execution, branch prediction tables, and out-of-order execution pipelines to maximize instruction-level parallelism.",
-        "Cache coherence protocols such as MESI and MOESI resolve memory state discrepancies between private L1/L2 caches and shared L3 cache lines.",
-        "Virtual memory paging hardware translates virtual page numbers into physical frame numbers through hardware page table walks and translation lookaside buffers.",
-        "Compiler optimization pipelines perform static single assignment transformations, constant propagation, loop invariant code motion, and vectorization.",
-        "Graphics processing units feature high memory bandwidth and thousands of arithmetic logic units architected for single instruction multiple thread execution.",
-        "Deep autoregressive language models parameterize joint token distributions using multi-layer transformer blocks equipped with scaled dot-product attention.",
-        "Key-value caching reduces auto-regressive decoding compute requirements from quadratic to linear time by preserving prior key and value projection tensors.",
-        "Streaming and quantized KV caches compress past context activations to mitigate high-bandwidth memory exhaustion during long-sequence generation tasks.",
-        "The solar system formed approximately 4.6 billion years ago from the gravitational collapse of a giant interstellar molecular cloud.",
-        "Terrestrial planets including Mercury, Venus, Earth, and Mars are composed predominantly of silicate rock and metallic iron-nickel cores.",
-        "Giant gas planets Jupiter and Saturn contain substantial atmospheric envelopes of molecular hydrogen and helium surrounding dense rocky cores.",
-        "Ice giant planets Uranus and Neptune possess mantles rich in water, ammonia, and methane ices surrounding mantle transition zones.",
-        "Quantum electrodynamics describes the relativistic quantum field interactions between electromagnetic radiation and charged fermionic matter.",
-        "The Standard Model of particle physics unifies electromagnetic, weak, and strong nuclear interactions into an SU(3)xSU(2)xU(1) gauge symmetry group.",
-        "Thermodynamics governs macroscopic energy transformations through the conservation of energy and the monotonic increase of physical entropy in isolated systems.",
-        "Photosynthesis in vascular plants converts incident solar photon energy into chemical bond energy stored within synthesized hexose monosaccharides.",
-        "Cellular respiration oxidizes intracellular glucose substrates via glycolysis, the citric acid cycle, and oxidative phosphorylation to produce adenosine triphosphate.",
-        "Deoxyribonucleic acid encodes hereditary genomic information in the sequential ordering of four heterocyclic purine and pyrimidine nitrogenous bases.",
-        "Mendelian inheritance patterns elucidate phenotypic trait transmission governed by dominant, recessive, and codominant autosomal allele segregation.",
-        "Plate tectonics explains planetary lithospheric dynamics through the convergent, divergent, and transform boundaries of rigid continental plates.",
-        "Sedimentary rock stratification preserves paleontological chronologies of fossilized biological organisms across distinct geological epochs.",
-        "Oceanic thermohaline circulation drives global heat redistribution between equatorial waters and polar extremities through density and salinity gradients.",
-        "Atmospheric circulation cells including Hadley, Ferrel, and polar convective loops determine regional climatic zones and prevailing wind patterns.",
-        "Macroeconomic theory models national aggregate production functions via labor elasticity, physical capital accumulation, and total factor productivity.",
-        "Monetary policy authorities utilize open market bond operations, reserve requirement ratios, and benchmark lending interest rates to manage inflation.",
-        "Microeconomic equilibrium emerges at the price clearing intersection of consumer marginal utility functions and producer marginal cost schedules.",
-        "International trade models based on Ricardian comparative advantage demonstrate welfare maximization under specialized production and open commerce.",
-        "Behavioral economics investigates systematic cognitive heuristics, risk aversion asymmetries, and hyperbolic discounting in human decision-making.",
-        "Linguistic phonology categorizes human speech sounds into discrete phonemic inventories characterized by place and manner of articulation.",
-        "Syntactic parse trees model hierarchical constituent sentence structures governed by context-free and context-sensitive grammatical production rules.",
-        "Epistemological philosophical inquiries address the necessary and sufficient criteria demarcating justified true belief from mere opinion.",
-        "Utilitarian moral frameworks evaluate moral actions based on the aggregation of hedonic consequences and the minimization of suffering.",
-        "Deontological ethical philosophies derive moral duties from universal categorical imperatives rather than contingent outcomes.",
-        "Organic chemistry classifies covalent carbon molecules into functional families such as alkanes, alkenes, alcohols, aldehydes, and aromatic compounds.",
-        "Enzyme catalysis lowers the activation energy of biological metabolic reactions via transition state stabilization and stereospecific binding.",
-        "Fluid mechanics characterizes convective flow regimes through dimensionless Reynolds, Mach, and Navier-Stokes governing differential equations.",
-        "Structural engineering analyzes tensile, compressive, and torsional stresses in load-bearing composite beams and reinforced trusses.",
-        "Signal processing theory relies on Fourier analysis to decompose arbitrary time-domain continuous or discrete signals into harmonic frequency components.",
-        "Information theory establishes the fundamental Shannon entropy limits on lossless data compression and noisy channel capacity.",
-        "Graph theory investigates structural properties of vertices and edges including planarity, chromatic numbers, Hamiltonian cycles, and shortest paths."
-    ]
-    text = "\n\n".join(sample_paragraphs)
-    if tokenizer is not None:
-        tokens = tokenizer(text, return_tensors="pt").input_ids
-        while tokens.shape[1] < min_tokens:
-            text = text + "\n\n" + text
-            tokens = tokenizer(text, return_tensors="pt").input_ids
-    return text
+    from benchmarks.corpus import get_large_corpus
+    return get_large_corpus(min_tokens=min_tokens, tokenizer=tokenizer)
 
 
 def generate_step_by_step(model, input_ids: torch.Tensor, max_new_tokens: int = 20) -> Tuple[torch.Tensor, List[float]]:

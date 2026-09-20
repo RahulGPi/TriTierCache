@@ -9,7 +9,7 @@ from src.tri_tier.constants import (
 )
 
 class TriTierCache():
-    def __init__(self, max_seq_len, head_dim, num_heads, R_size, H_ratio, num_q_heads=None):
+    def __init__(self, max_seq_len, head_dim, num_heads, R_size, H_ratio, num_q_heads=None, score_decay=0.999):
         """
         Initialise the buffer size 
         R_size -> Recent Window Size
@@ -19,6 +19,7 @@ class TriTierCache():
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.num_q_heads = num_q_heads if num_q_heads is not None else num_heads
+        self.score_decay = score_decay
         self.current_threshold = 0.0
 
         self.max_heavy_hitters = math.ceil(max_seq_len * H_ratio)
@@ -27,6 +28,7 @@ class TriTierCache():
         # Try to initialize C++ cache engine
         try:
             from tri_tier import _C
+            decay_val = 1.0 if score_decay is None else float(score_decay)
             self._engine = _C.TriTierCacheEngine(
                 self.num_q_heads,
                 self.num_heads,
@@ -34,7 +36,8 @@ class TriTierCache():
                 max_seq_len,
                 SINK_SIZE,
                 R_size,
-                H_ratio
+                H_ratio,
+                decay_val
             )
         except Exception:
             self._engine = None

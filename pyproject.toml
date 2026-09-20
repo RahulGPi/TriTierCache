@@ -29,6 +29,7 @@ idk-what-to-name-this = "tri_tier.cli:main"
 
 [dependency-groups]
 dev = [
+    "huggingface-hub>=1.29.0",
     "pytest>=9.1.1",
 ]
 
