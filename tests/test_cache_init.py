@@ -12,8 +12,8 @@ import math
 import torch
 import pytest
 
-from tri_tier.cache import TriTierCache
-from tri_tier.constants import CHUNK_SIZE
+from src.tri_tier.cache import TriTierCache
+from src.tri_tier.constants import CHUNK_SIZE
 
 # Deliberately "ugly" numbers so ceiling/rounding behavior gets exercised
 # instead of hidden by convenient round numbers.
@@ -135,19 +135,19 @@ class TestBackgroundValues:
     """Tier 3 V storage -- 2-bit, per-token, packed along head_dim."""
 
     def test_packed_shape_is_per_token(self, cache):
-        n, qd = cache.max_background_tokens, cache.quant_head_dim
+        n, qd = cache.num_blocks * CHUNK_SIZE, cache.quant_head_dim
         assert cache.PBS_V_Packed.shape == (n, NUM_HEADS, qd)
         assert cache.PBS_V_Packed.dtype == torch.int32
 
     def test_scale_and_zero_are_one_per_token(self, cache):
-        n = cache.max_background_tokens
+        n = cache.num_blocks * CHUNK_SIZE
         assert cache.PBS_V_Scales.shape == (n, NUM_HEADS, 1)
         assert cache.PBS_V_Zeroes.shape == (n, NUM_HEADS, 1)
 
 
 class TestBackgroundTokenIds:
     def test_shape_and_dtype(self, cache):
-        assert cache.PBS_token_ids.shape == (cache.max_background_tokens,)
+        assert cache.PBS_token_ids.shape == (cache.num_blocks * CHUNK_SIZE,)
         assert cache.PBS_token_ids.dtype == torch.int64
 
     def test_starts_as_unused_sentinel(self, cache):
