@@ -1,7 +1,7 @@
 import torch
 import math
 
-from src.tri_tier.constants import (
+from .constants import (
     DEVICE, 
     UPDATE_THRESHOLD,
     CHUNK_SIZE,
@@ -9,7 +9,7 @@ from src.tri_tier.constants import (
 )
 
 class TriTierCache():
-    def __init__(self, max_seq_len, head_dim, num_heads, R_size, H_ratio, num_q_heads=None, score_decay=0.999):
+    def __init__(self, max_seq_len, head_dim, num_heads, R_size, H_ratio, num_q_heads=None, score_decay=0.999, k_group_size=16, pbs_metadata_dtype="fp16"):
         """
         Initialise the buffer size 
         R_size -> Recent Window Size
@@ -20,6 +20,8 @@ class TriTierCache():
         self.head_dim = head_dim
         self.num_q_heads = num_q_heads if num_q_heads is not None else num_heads
         self.score_decay = score_decay
+        self.k_group_size = 32 if k_group_size == 32 else 16
+        self.pbs_metadata_dtype = "fp32" if str(pbs_metadata_dtype).lower() == "fp32" else "fp16"
         self.current_threshold = 0.0
 
         self.max_heavy_hitters = math.ceil(max_seq_len * H_ratio)
@@ -37,7 +39,10 @@ class TriTierCache():
                 SINK_SIZE,
                 R_size,
                 H_ratio,
-                decay_val
+                decay_val,
+                UPDATE_THRESHOLD,
+                self.k_group_size,
+                self.pbs_metadata_dtype
             )
         except Exception:
             self._engine = None

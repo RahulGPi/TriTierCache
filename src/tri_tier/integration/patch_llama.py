@@ -1,6 +1,6 @@
 import torch
 from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb
-from src.tri_tier.cache import TriTierCache
+from ..cache import TriTierCache
 
 try:
     import tri_tier._C as _C
@@ -14,6 +14,8 @@ MAX_SEQ_LEN = 32768
 R_SIZE = 256
 H_RATIO = 0.05
 SCORE_DECAY = 0.999
+K_GROUP_SIZE = 16
+PBS_METADATA_DTYPE = "fp16"
 
 
 def _reference_attention_path(self, cache: TriTierCache, Q: torch.Tensor, num_q_heads: int, num_kv_heads: int, head_dim: int):
@@ -64,6 +66,8 @@ def patched_forward(self,
             H_ratio=H_RATIO,
             num_q_heads=num_q_heads,
             score_decay=SCORE_DECAY,
+            k_group_size=K_GROUP_SIZE,
+            pbs_metadata_dtype=PBS_METADATA_DTYPE,
         )
     cache = self.tri_tier_cache
 

@@ -142,30 +142,33 @@ static thread_local std::vector<float> tls_pbs_v_dequant;
 static thread_local std::vector<float> tls_row_max;
 static thread_local std::vector<float> tls_row_sum_exp;
 
-void fused_attention_decode_avx2(
+template <typename MetaT>
+static void fused_attention_decode_impl(
     const float* Q,
     const float* dense_K,
     const float* dense_V,
     int dense_count,
     const int32_t* PBS_K_Packed,
-    const float* PBS_K_Scales,
-    const float* PBS_K_Zeroes,
+    const MetaT* PBS_K_Scales,
+    const MetaT* PBS_K_Zeroes,
     const int32_t* PBS_V_Packed,
-    const float* PBS_V_Scales,
-    const float* PBS_V_Zeroes,
+    const MetaT* PBS_V_Scales,
+    const MetaT* PBS_V_Zeroes,
     const int64_t* PBS_token_ids,
     int num_blocks,
     int num_q_heads,
     int num_kv_heads,
     int head_dim,
     float* attn_output,
-    float* mean_attn_weights)
+    float* mean_attn_weights,
+    int k_group_size)
 {
     const float inv_sqrt_hd = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    const int total_pbs     = num_blocks * 16;
+    const int total_pbs     = num_blocks * k_group_size;
     const int total_tokens  = dense_count + total_pbs;
     const float NEG_INF     = -std::numeric_limits<float>::infinity();
     const int gqa_ratio     = (num_kv_heads > 0) ? (num_q_heads / num_kv_heads) : 1;
+    const int words_per_k_block = k_group_size / 16;
 
     // Allocate score matrix: [num_q_heads, total_tokens]
     size_t req_scores = static_cast<size_t>(num_q_heads) * total_tokens;
@@ -192,18 +195,18 @@ void fused_attention_decode_avx2(
         #pragma omp parallel for schedule(dynamic, 1)
         for (int b = 0; b < num_blocks; ++b) {
             dequantize_k_avx2(
-                PBS_K_Packed + static_cast<size_t>(b) * num_kv_heads * head_dim,
+                PBS_K_Packed + static_cast<size_t>(b) * words_per_k_block * num_kv_heads * head_dim,
                 PBS_K_Scales + static_cast<size_t>(b) * num_kv_heads * head_dim,
                 PBS_K_Zeroes + static_cast<size_t>(b) * num_kv_heads * head_dim,
-                pbs_k_dequant_ptr + static_cast<size_t>(b) * 16 * num_kv_heads * head_dim,
-                /*num_blocks=*/1, num_kv_heads, head_dim);
+                pbs_k_dequant_ptr + static_cast<size_t>(b) * k_group_size * num_kv_heads * head_dim,
+                /*num_blocks=*/1, num_kv_heads, head_dim, k_group_size);
 
             dequantize_v_avx2(
-                PBS_V_Packed + static_cast<size_t>(b) * 16 * num_kv_heads * ((head_dim + 15) / 16),
-                PBS_V_Scales + static_cast<size_t>(b) * 16 * num_kv_heads,
-                PBS_V_Zeroes + static_cast<size_t>(b) * 16 * num_kv_heads,
-                pbs_v_dequant_ptr + static_cast<size_t>(b) * 16 * num_kv_heads * head_dim,
-                /*total_tokens=*/16, num_kv_heads, head_dim);
+                PBS_V_Packed + static_cast<size_t>(b) * k_group_size * num_kv_heads * ((head_dim + 15) / 16),
+                PBS_V_Scales + static_cast<size_t>(b) * k_group_size * num_kv_heads,
+                PBS_V_Zeroes + static_cast<size_t>(b) * k_group_size * num_kv_heads,
+                pbs_v_dequant_ptr + static_cast<size_t>(b) * k_group_size * num_kv_heads * head_dim,
+                /*total_tokens=*/k_group_size, num_kv_heads, head_dim);
         }
     }
 
@@ -230,12 +233,12 @@ void fused_attention_decode_avx2(
 
         // Pass A2: PBS background tokens
         for (int b = 0; b < num_blocks; ++b) {
-            for (int t = 0; t < 16; ++t) {
-                int global_idx = dense_count + b * 16 + t;
-                if (PBS_token_ids[b * 16 + t] == -1) {
+            for (int t = 0; t < k_group_size; ++t) {
+                int global_idx = dense_count + b * k_group_size + t;
+                if (PBS_token_ids[b * k_group_size + t] == -1) {
                     head_scores[global_idx] = NEG_INF;
                 } else {
-                    const float* k = pbs_k_dequant_ptr + (static_cast<size_t>(b * 16 + t) * num_kv_heads + kv_h) * head_dim;
+                    const float* k = pbs_k_dequant_ptr + (static_cast<size_t>(b * k_group_size + t) * num_kv_heads + kv_h) * head_dim;
                     head_scores[global_idx] = dot_avx2(q, k, head_dim) * inv_sqrt_hd;
                 }
             }
@@ -270,11 +273,11 @@ void fused_attention_decode_avx2(
 
         // PBS V accumulation
         for (int b = 0; b < num_blocks; ++b) {
-            for (int t = 0; t < 16; ++t) {
-                if (PBS_token_ids[b * 16 + t] == -1) continue;
-                int global_idx = dense_count + b * 16 + t;
+            for (int t = 0; t < k_group_size; ++t) {
+                if (PBS_token_ids[b * k_group_size + t] == -1) continue;
+                int global_idx = dense_count + b * k_group_size + t;
                 float w = std::exp(head_scores[global_idx] - mx) * inv_sum;
-                const float* v = pbs_v_dequant_ptr + (static_cast<size_t>(b * 16 + t) * num_kv_heads + kv_h) * head_dim;
+                const float* v = pbs_v_dequant_ptr + (static_cast<size_t>(b * k_group_size + t) * num_kv_heads + kv_h) * head_dim;
                 axpy_avx2(out_h, v, w, head_dim);
             }
         }
@@ -295,4 +298,60 @@ void fused_attention_decode_avx2(
             mean_attn_weights[i] = sum_w / static_cast<float>(num_q_heads);
         }
     }
+}
+
+void fused_attention_decode_avx2(
+    const float* Q,
+    const float* dense_K,
+    const float* dense_V,
+    int dense_count,
+    const int32_t* PBS_K_Packed,
+    const float* PBS_K_Scales,
+    const float* PBS_K_Zeroes,
+    const int32_t* PBS_V_Packed,
+    const float* PBS_V_Scales,
+    const float* PBS_V_Zeroes,
+    const int64_t* PBS_token_ids,
+    int num_blocks,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    float* attn_output,
+    float* mean_attn_weights,
+    int k_group_size)
+{
+    fused_attention_decode_impl<float>(
+        Q, dense_K, dense_V, dense_count,
+        PBS_K_Packed, PBS_K_Scales, PBS_K_Zeroes,
+        PBS_V_Packed, PBS_V_Scales, PBS_V_Zeroes,
+        PBS_token_ids, num_blocks, num_q_heads, num_kv_heads, head_dim,
+        attn_output, mean_attn_weights, k_group_size);
+}
+
+void fused_attention_decode_avx2(
+    const float* Q,
+    const float* dense_K,
+    const float* dense_V,
+    int dense_count,
+    const int32_t* PBS_K_Packed,
+    const uint16_t* PBS_K_Scales,
+    const uint16_t* PBS_K_Zeroes,
+    const int32_t* PBS_V_Packed,
+    const uint16_t* PBS_V_Scales,
+    const uint16_t* PBS_V_Zeroes,
+    const int64_t* PBS_token_ids,
+    int num_blocks,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    float* attn_output,
+    float* mean_attn_weights,
+    int k_group_size)
+{
+    fused_attention_decode_impl<uint16_t>(
+        Q, dense_K, dense_V, dense_count,
+        PBS_K_Packed, PBS_K_Scales, PBS_K_Zeroes,
+        PBS_V_Packed, PBS_V_Scales, PBS_V_Zeroes,
+        PBS_token_ids, num_blocks, num_q_heads, num_kv_heads, head_dim,
+        attn_output, mean_attn_weights, k_group_size);
 }

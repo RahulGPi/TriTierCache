@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -15,11 +16,14 @@ public:
     int sink_size;
     int rw_size;
     float h_ratio;
-    int max_hh;
-    int chunk_size; // 16
-    int quant_head_dim; // (head_dim + 15) / 16
     float score_decay;
     int update_interval;
+    int k_group_size; // 16 or 32
+    std::string pbs_metadata_dtype; // "fp16" or "fp32"
+    bool use_fp16_meta;
+    int chunk_size; // equals k_group_size (16 or 32)
+    int quant_head_dim; // (head_dim + 15) / 16
+    int max_hh;
 
     // Sinks
     int s_count;
@@ -50,11 +54,16 @@ public:
     int pbs_blocks_used;
     int pbs_count; // tokens in PBS
     std::vector<int32_t> PBS_K_Packed;
-    std::vector<float> PBS_K_Scales;
-    std::vector<float> PBS_K_Zeroes;
+    std::vector<float> PBS_K_Scales_fp32;
+    std::vector<float> PBS_K_Zeroes_fp32;
+    std::vector<uint16_t> PBS_K_Scales_fp16;
+    std::vector<uint16_t> PBS_K_Zeroes_fp16;
+
     std::vector<int32_t> PBS_V_Packed;
-    std::vector<float> PBS_V_Scales;
-    std::vector<float> PBS_V_Zeroes;
+    std::vector<float> PBS_V_Scales_fp32;
+    std::vector<float> PBS_V_Zeroes_fp32;
+    std::vector<uint16_t> PBS_V_Scales_fp16;
+    std::vector<uint16_t> PBS_V_Zeroes_fp16;
     std::vector<int64_t> PBS_token_ids;
 
     // Global attention scoring
@@ -78,7 +87,9 @@ public:
         int rw_size = 64,
         float h_ratio = 0.1f,
         float score_decay = 0.999f,
-        int update_interval = 16
+        int update_interval = 16,
+        int k_group_size = 16,
+        const std::string& pbs_metadata_dtype = "fp16"
     );
 
     ~TriTierCacheEngine() = default;

@@ -60,6 +60,9 @@ def evaluate_per_position_ppl(model,
     """Evaluates NLL across 4 context segments for a specific RoPE mode."""
     patch_mod.R_SIZE = r_size
     patch_mod.H_RATIO = h_ratio
+    patch_mod.K_GROUP_SIZE = 16
+    patch_mod.PBS_METADATA_DTYPE = "fp16"
+    patch_mod.SCORE_DECAY = 0.999
     apply_patch()
     reset_caches(model)
 
@@ -83,8 +86,14 @@ def evaluate_per_position_ppl(model,
             if rope_mode == "a":
                 pos_tensor = torch.tensor([[pos]], dtype=torch.int64)
             else:
-                # StreamingLLM re-rotation: relative position within active window + sinks
-                rel_pos = min(pos, r_size + 4)
+                # Mode 'b': StreamingLLM re-rotation.
+                # Pre-eviction and within trained window (pos < trained_len):
+                # positions advance naturally with pos (identical to mode 'a' pre-eviction).
+                # Past trained boundary (pos >= trained_len): position wraps within trained window.
+                if pos < trained_len:
+                    rel_pos = pos
+                else:
+                    rel_pos = (pos % trained_len)
                 pos_tensor = torch.tensor([[rel_pos]], dtype=torch.int64)
 
             out = model(tok_in, position_ids=pos_tensor)
@@ -128,6 +137,9 @@ def evaluate_niah_at_length(model,
     """
     patch_mod.R_SIZE = 256
     patch_mod.H_RATIO = 0.05
+    patch_mod.K_GROUP_SIZE = 16
+    patch_mod.PBS_METADATA_DTYPE = "fp16"
+    patch_mod.SCORE_DECAY = 0.999
     apply_patch()
 
     needle_sentence = f" Special notice: the secret retrieval key is {needle_key}. Remember this key. "
@@ -163,7 +175,7 @@ def evaluate_niah_at_length(model,
                 if rope_mode == "a":
                     pos_tensor = torch.tensor([[p]], dtype=torch.int64)
                 else:
-                    rel_pos = min(p, 256 + 4)
+                    rel_pos = p if p < trained_len else (p % trained_len)
                     pos_tensor = torch.tensor([[rel_pos]], dtype=torch.int64)
                 out = model(tok_in, position_ids=pos_tensor)
 
@@ -177,7 +189,8 @@ def evaluate_niah_at_length(model,
                 if rope_mode == "a":
                     pos_tensor = torch.tensor([[curr_pos + step]], dtype=torch.int64)
                 else:
-                    rel_pos = min(curr_pos + step, 256 + 4)
+                    dec_pos = curr_pos + step
+                    rel_pos = dec_pos if dec_pos < trained_len else (dec_pos % trained_len)
                     pos_tensor = torch.tensor([[rel_pos]], dtype=torch.int64)
                 out = model(curr_id, position_ids=pos_tensor)
                 curr_id = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)

@@ -14,7 +14,9 @@ TriTierCacheEngine::TriTierCacheEngine(
     int rw_size,
     float h_ratio,
     float score_decay,
-    int update_interval
+    int update_interval,
+    int k_group_size,
+    const std::string& pbs_metadata_dtype
 ) : num_q_heads(num_q_heads),
     num_kv_heads(num_kv_heads),
     head_dim(head_dim),
@@ -24,6 +26,9 @@ TriTierCacheEngine::TriTierCacheEngine(
     h_ratio(h_ratio),
     score_decay(score_decay),
     update_interval(update_interval),
+    k_group_size((k_group_size == 32) ? 32 : 16),
+    pbs_metadata_dtype(pbs_metadata_dtype),
+    use_fp16_meta(pbs_metadata_dtype == "fp16"),
     s_count(0),
     rw_count(0),
     rw_head_index(0),
@@ -37,7 +42,7 @@ TriTierCacheEngine::TriTierCacheEngine(
     last_calc_pos(-1),
     total_evictions(0)
 {
-    chunk_size = 16;
+    chunk_size = this->k_group_size;
     quant_head_dim = (head_dim + 15) / 16;
     max_hh = static_cast<int>(std::ceil(max_seq_len * h_ratio));
     if (max_hh < 1) max_hh = 1;
@@ -79,18 +84,27 @@ TriTierCacheEngine::TriTierCacheEngine(
 void TriTierCacheEngine::ensure_pbs_capacity(int min_blocks) {
     if (min_blocks <= pbs_allocated_blocks) return;
 
-    // Grow in chunks of 64 blocks (1024 tokens)
+    // Grow in chunks of 64 blocks
     int new_blocks = std::max(pbs_allocated_blocks + 64, min_blocks);
     size_t kv_stride = static_cast<size_t>(num_kv_heads) * head_dim;
+    int words_per_k_block = k_group_size / 16;
 
-    PBS_K_Packed.resize(static_cast<size_t>(new_blocks) * kv_stride, 0);
-    PBS_K_Scales.resize(static_cast<size_t>(new_blocks) * kv_stride, 0.0f);
-    PBS_K_Zeroes.resize(static_cast<size_t>(new_blocks) * kv_stride, 0.0f);
+    PBS_K_Packed.resize(static_cast<size_t>(new_blocks) * words_per_k_block * kv_stride, 0);
+
+    if (use_fp16_meta) {
+        PBS_K_Scales_fp16.resize(static_cast<size_t>(new_blocks) * kv_stride, 0);
+        PBS_K_Zeroes_fp16.resize(static_cast<size_t>(new_blocks) * kv_stride, 0);
+        PBS_V_Scales_fp16.resize(static_cast<size_t>(new_blocks) * chunk_size * num_kv_heads, 0);
+        PBS_V_Zeroes_fp16.resize(static_cast<size_t>(new_blocks) * chunk_size * num_kv_heads, 0);
+    } else {
+        PBS_K_Scales_fp32.resize(static_cast<size_t>(new_blocks) * kv_stride, 0.0f);
+        PBS_K_Zeroes_fp32.resize(static_cast<size_t>(new_blocks) * kv_stride, 0.0f);
+        PBS_V_Scales_fp32.resize(static_cast<size_t>(new_blocks) * chunk_size * num_kv_heads, 0.0f);
+        PBS_V_Zeroes_fp32.resize(static_cast<size_t>(new_blocks) * chunk_size * num_kv_heads, 0.0f);
+    }
 
     size_t v_packed_stride = static_cast<size_t>(num_kv_heads) * quant_head_dim;
     PBS_V_Packed.resize(static_cast<size_t>(new_blocks) * chunk_size * v_packed_stride, 0);
-    PBS_V_Scales.resize(static_cast<size_t>(new_blocks) * chunk_size * num_kv_heads, 0.0f);
-    PBS_V_Zeroes.resize(static_cast<size_t>(new_blocks) * chunk_size * num_kv_heads, 0.0f);
 
     size_t prev_tok_size = PBS_token_ids.size();
     PBS_token_ids.resize(static_cast<size_t>(new_blocks) * chunk_size, -1);
@@ -134,27 +148,53 @@ float TriTierCacheEngine::fetch_or_calc_threshold() {
 void TriTierCacheEngine::flush_waiting_room_to_pbs() {
     ensure_pbs_capacity(pbs_blocks_used + 1);
     size_t kv_stride = static_cast<size_t>(num_kv_heads) * head_dim;
-
-    // Quantize K
-    quantize_k_block_avx2(
-        WR_K.data(),
-        reinterpret_cast<uint32_t*>(PBS_K_Packed.data() + static_cast<size_t>(pbs_blocks_used) * kv_stride),
-        PBS_K_Scales.data() + static_cast<size_t>(pbs_blocks_used) * kv_stride,
-        PBS_K_Zeroes.data() + static_cast<size_t>(pbs_blocks_used) * kv_stride,
-        num_kv_heads,
-        head_dim
-    );
-
-    // Quantize V
+    int words_per_k_block = k_group_size / 16;
     size_t v_packed_stride = static_cast<size_t>(num_kv_heads) * quant_head_dim;
-    quantize_v_block_avx2(
-        WR_V.data(),
-        PBS_V_Packed.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * v_packed_stride,
-        PBS_V_Scales.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * num_kv_heads,
-        PBS_V_Zeroes.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * num_kv_heads,
-        num_kv_heads,
-        head_dim
+
+    uint32_t* k_packed_dest = reinterpret_cast<uint32_t*>(
+        PBS_K_Packed.data() + static_cast<size_t>(pbs_blocks_used) * words_per_k_block * kv_stride
     );
+    int32_t* v_packed_dest = PBS_V_Packed.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * v_packed_stride;
+
+    if (use_fp16_meta) {
+        quantize_k_block_avx2(
+            WR_K.data(),
+            k_packed_dest,
+            PBS_K_Scales_fp16.data() + static_cast<size_t>(pbs_blocks_used) * kv_stride,
+            PBS_K_Zeroes_fp16.data() + static_cast<size_t>(pbs_blocks_used) * kv_stride,
+            num_kv_heads,
+            head_dim,
+            k_group_size
+        );
+        quantize_v_block_avx2(
+            WR_V.data(),
+            v_packed_dest,
+            PBS_V_Scales_fp16.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * num_kv_heads,
+            PBS_V_Zeroes_fp16.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * num_kv_heads,
+            num_kv_heads,
+            head_dim,
+            chunk_size
+        );
+    } else {
+        quantize_k_block_avx2(
+            WR_K.data(),
+            k_packed_dest,
+            PBS_K_Scales_fp32.data() + static_cast<size_t>(pbs_blocks_used) * kv_stride,
+            PBS_K_Zeroes_fp32.data() + static_cast<size_t>(pbs_blocks_used) * kv_stride,
+            num_kv_heads,
+            head_dim,
+            k_group_size
+        );
+        quantize_v_block_avx2(
+            WR_V.data(),
+            v_packed_dest,
+            PBS_V_Scales_fp32.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * num_kv_heads,
+            PBS_V_Zeroes_fp32.data() + static_cast<size_t>(pbs_blocks_used) * chunk_size * num_kv_heads,
+            num_kv_heads,
+            head_dim,
+            chunk_size
+        );
+    }
 
     // Copy token IDs
     for (int t = 0; t < chunk_size; ++t) {
@@ -279,27 +319,53 @@ void TriTierCacheEngine::prefill(
             int src_tok_idx = sink_size + b * chunk_size;
             const float* k_src = K_all + static_cast<size_t>(src_tok_idx) * kv_stride;
             const float* v_src = V_all + static_cast<size_t>(src_tok_idx) * kv_stride;
-
-            // Quantize K block
-            quantize_k_block_avx2(
-                k_src,
-                reinterpret_cast<uint32_t*>(PBS_K_Packed.data() + static_cast<size_t>(block_dest) * kv_stride),
-                PBS_K_Scales.data() + static_cast<size_t>(block_dest) * kv_stride,
-                PBS_K_Zeroes.data() + static_cast<size_t>(block_dest) * kv_stride,
-                num_kv_heads,
-                head_dim
-            );
-
-            // Quantize V block
+            int words_per_k_block = k_group_size / 16;
             size_t v_packed_stride = static_cast<size_t>(num_kv_heads) * quant_head_dim;
-            quantize_v_block_avx2(
-                v_src,
-                PBS_V_Packed.data() + static_cast<size_t>(block_dest) * chunk_size * v_packed_stride,
-                PBS_V_Scales.data() + static_cast<size_t>(block_dest) * chunk_size * num_kv_heads,
-                PBS_V_Zeroes.data() + static_cast<size_t>(block_dest) * chunk_size * num_kv_heads,
-                num_kv_heads,
-                head_dim
+
+            uint32_t* k_packed_dest = reinterpret_cast<uint32_t*>(
+                PBS_K_Packed.data() + static_cast<size_t>(block_dest) * words_per_k_block * kv_stride
             );
+            int32_t* v_packed_dest = PBS_V_Packed.data() + static_cast<size_t>(block_dest) * chunk_size * v_packed_stride;
+
+            if (use_fp16_meta) {
+                quantize_k_block_avx2(
+                    k_src,
+                    k_packed_dest,
+                    PBS_K_Scales_fp16.data() + static_cast<size_t>(block_dest) * kv_stride,
+                    PBS_K_Zeroes_fp16.data() + static_cast<size_t>(block_dest) * kv_stride,
+                    num_kv_heads,
+                    head_dim,
+                    k_group_size
+                );
+                quantize_v_block_avx2(
+                    v_src,
+                    v_packed_dest,
+                    PBS_V_Scales_fp16.data() + static_cast<size_t>(block_dest) * chunk_size * num_kv_heads,
+                    PBS_V_Zeroes_fp16.data() + static_cast<size_t>(block_dest) * chunk_size * num_kv_heads,
+                    num_kv_heads,
+                    head_dim,
+                    chunk_size
+                );
+            } else {
+                quantize_k_block_avx2(
+                    k_src,
+                    k_packed_dest,
+                    PBS_K_Scales_fp32.data() + static_cast<size_t>(block_dest) * kv_stride,
+                    PBS_K_Zeroes_fp32.data() + static_cast<size_t>(block_dest) * kv_stride,
+                    num_kv_heads,
+                    head_dim,
+                    k_group_size
+                );
+                quantize_v_block_avx2(
+                    v_src,
+                    v_packed_dest,
+                    PBS_V_Scales_fp32.data() + static_cast<size_t>(block_dest) * chunk_size * num_kv_heads,
+                    PBS_V_Zeroes_fp32.data() + static_cast<size_t>(block_dest) * chunk_size * num_kv_heads,
+                    num_kv_heads,
+                    head_dim,
+                    chunk_size
+                );
+            }
 
             for (int t = 0; t < chunk_size; ++t) {
                 PBS_token_ids[static_cast<size_t>(block_dest) * chunk_size + t] = src_tok_idx + t;
@@ -393,30 +459,54 @@ void TriTierCacheEngine::step(
     }
 
     // 3. Fused attention decode
-    int total_tokens = dense_count + pbs_blocks_used * 16;
+    int total_tokens = dense_count + pbs_blocks_used * chunk_size;
     if (mean_attn_weights.size() < static_cast<size_t>(total_tokens)) {
         mean_attn_weights.resize(total_tokens);
     }
 
-    fused_attention_decode_avx2(
-        Q,
-        dense_K.data(),
-        dense_V.data(),
-        dense_count,
-        PBS_K_Packed.data(),
-        PBS_K_Scales.data(),
-        PBS_K_Zeroes.data(),
-        PBS_V_Packed.data(),
-        PBS_V_Scales.data(),
-        PBS_V_Zeroes.data(),
-        PBS_token_ids.data(),
-        pbs_blocks_used,
-        num_q_heads,
-        num_kv_heads,
-        head_dim,
-        attn_output,
-        mean_attn_weights.data()
-    );
+    if (use_fp16_meta) {
+        fused_attention_decode_avx2(
+            Q,
+            dense_K.data(),
+            dense_V.data(),
+            dense_count,
+            PBS_K_Packed.data(),
+            PBS_K_Scales_fp16.data(),
+            PBS_K_Zeroes_fp16.data(),
+            PBS_V_Packed.data(),
+            PBS_V_Scales_fp16.data(),
+            PBS_V_Zeroes_fp16.data(),
+            PBS_token_ids.data(),
+            pbs_blocks_used,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            attn_output,
+            mean_attn_weights.data(),
+            k_group_size
+        );
+    } else {
+        fused_attention_decode_avx2(
+            Q,
+            dense_K.data(),
+            dense_V.data(),
+            dense_count,
+            PBS_K_Packed.data(),
+            PBS_K_Scales_fp32.data(),
+            PBS_K_Zeroes_fp32.data(),
+            PBS_V_Packed.data(),
+            PBS_V_Scales_fp32.data(),
+            PBS_V_Zeroes_fp32.data(),
+            PBS_token_ids.data(),
+            pbs_blocks_used,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            attn_output,
+            mean_attn_weights.data(),
+            k_group_size
+        );
+    }
 
     // 4. Score feedback (exponential decay scoring)
     // Sinks
@@ -442,7 +532,7 @@ void TriTierCacheEngine::step(
         }
     }
     // PBS
-    for (int i = 0; i < pbs_blocks_used * 16; ++i) {
+    for (int i = 0; i < pbs_blocks_used * chunk_size; ++i) {
         int64_t tid = PBS_token_ids[i];
         if (tid >= 0 && tid < max_seq_len) {
             global_attn_scores[tid] = score_decay * global_attn_scores[tid] + mean_attn_weights[dense_count + i];
@@ -460,11 +550,18 @@ size_t TriTierCacheEngine::get_buffer_bytes() const {
     bytes += WR_token_ids.size() * sizeof(int64_t);
     // Explicitly accounted PBS allocated bytes
     bytes += PBS_K_Packed.size() * sizeof(int32_t);
-    bytes += PBS_K_Scales.size() * sizeof(float);
-    bytes += PBS_K_Zeroes.size() * sizeof(float);
+    if (use_fp16_meta) {
+        bytes += PBS_K_Scales_fp16.size() * sizeof(uint16_t);
+        bytes += PBS_K_Zeroes_fp16.size() * sizeof(uint16_t);
+        bytes += PBS_V_Scales_fp16.size() * sizeof(uint16_t);
+        bytes += PBS_V_Zeroes_fp16.size() * sizeof(uint16_t);
+    } else {
+        bytes += PBS_K_Scales_fp32.size() * sizeof(float);
+        bytes += PBS_K_Zeroes_fp32.size() * sizeof(float);
+        bytes += PBS_V_Scales_fp32.size() * sizeof(float);
+        bytes += PBS_V_Zeroes_fp32.size() * sizeof(float);
+    }
     bytes += PBS_V_Packed.size() * sizeof(int32_t);
-    bytes += PBS_V_Scales.size() * sizeof(float);
-    bytes += PBS_V_Zeroes.size() * sizeof(float);
     bytes += PBS_token_ids.size() * sizeof(int64_t);
     bytes += global_attn_scores.size() * sizeof(float);
     return bytes;

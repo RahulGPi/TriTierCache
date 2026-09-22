@@ -113,7 +113,9 @@ static void py_fused_attention_decode(
     int num_kv_heads,
     int head_dim,
     py::object attn_output_obj,
-    py::object mean_attn_weights_obj = py::none())
+    py::object mean_attn_weights_obj = py::none(),
+    int k_group_size = 16,
+    const std::string& pbs_metadata_dtype = "fp32")
 {
     if (dense_count < 0) {
         throw std::invalid_argument("dense_count must be non-negative.");
@@ -125,43 +127,52 @@ static void py_fused_attention_decode(
         throw std::invalid_argument("num_q_heads, num_kv_heads, and head_dim must be positive integers.");
     }
 
+    bool is_fp16 = (pbs_metadata_dtype == "fp16");
+    if (py::hasattr(PBS_K_Scales_obj, "dtype")) {
+        std::string dt_str = py::str(PBS_K_Scales_obj.attr("dtype")).cast<std::string>();
+        if (dt_str.find("float16") != std::string::npos || dt_str.find("half") != std::string::npos) {
+            is_fp16 = true;
+        }
+    }
+
     const float* Q_ptr = get_contiguous_ptr<const float>(Q_obj, "Q", false);
     const float* dense_K_ptr = get_contiguous_ptr<const float>(dense_K_obj, "dense_K", false, dense_count == 0);
     const float* dense_V_ptr = get_contiguous_ptr<const float>(dense_V_obj, "dense_V", false, dense_count == 0);
 
     const int32_t* PBS_K_Packed_ptr = get_contiguous_ptr<const int32_t>(PBS_K_Packed_obj, "PBS_K_Packed", false, num_blocks == 0);
-    const float* PBS_K_Scales_ptr = get_contiguous_ptr<const float>(PBS_K_Scales_obj, "PBS_K_Scales", false, num_blocks == 0);
-    const float* PBS_K_Zeroes_ptr = get_contiguous_ptr<const float>(PBS_K_Zeroes_obj, "PBS_K_Zeroes", false, num_blocks == 0);
-
     const int32_t* PBS_V_Packed_ptr = get_contiguous_ptr<const int32_t>(PBS_V_Packed_obj, "PBS_V_Packed", false, num_blocks == 0);
-    const float* PBS_V_Scales_ptr = get_contiguous_ptr<const float>(PBS_V_Scales_obj, "PBS_V_Scales", false, num_blocks == 0);
-    const float* PBS_V_Zeroes_ptr = get_contiguous_ptr<const float>(PBS_V_Zeroes_obj, "PBS_V_Zeroes", false, num_blocks == 0);
     const int64_t* PBS_token_ids_ptr = get_contiguous_ptr<const int64_t>(PBS_token_ids_obj, "PBS_token_ids", false, num_blocks == 0);
 
     float* attn_output_ptr = get_contiguous_ptr<float>(attn_output_obj, "attn_output", true);
     float* mean_attn_weights_ptr = get_contiguous_ptr<float>(mean_attn_weights_obj, "mean_attn_weights", true, true);
 
-    // Free Python GIL during heavy C++ AVX2 computation
-    {
+    if (is_fp16) {
+        const uint16_t* PBS_K_Scales_ptr = get_contiguous_ptr<const uint16_t>(PBS_K_Scales_obj, "PBS_K_Scales", false, num_blocks == 0);
+        const uint16_t* PBS_K_Zeroes_ptr = get_contiguous_ptr<const uint16_t>(PBS_K_Zeroes_obj, "PBS_K_Zeroes", false, num_blocks == 0);
+        const uint16_t* PBS_V_Scales_ptr = get_contiguous_ptr<const uint16_t>(PBS_V_Scales_obj, "PBS_V_Scales", false, num_blocks == 0);
+        const uint16_t* PBS_V_Zeroes_ptr = get_contiguous_ptr<const uint16_t>(PBS_V_Zeroes_obj, "PBS_V_Zeroes", false, num_blocks == 0);
+
         py::gil_scoped_release release;
         fused_attention_decode_avx2(
-            Q_ptr,
-            dense_K_ptr,
-            dense_V_ptr,
-            dense_count,
-            PBS_K_Packed_ptr,
-            PBS_K_Scales_ptr,
-            PBS_K_Zeroes_ptr,
-            PBS_V_Packed_ptr,
-            PBS_V_Scales_ptr,
-            PBS_V_Zeroes_ptr,
-            PBS_token_ids_ptr,
-            num_blocks,
-            num_q_heads,
-            num_kv_heads,
-            head_dim,
-            attn_output_ptr,
-            mean_attn_weights_ptr
+            Q_ptr, dense_K_ptr, dense_V_ptr, dense_count,
+            PBS_K_Packed_ptr, PBS_K_Scales_ptr, PBS_K_Zeroes_ptr,
+            PBS_V_Packed_ptr, PBS_V_Scales_ptr, PBS_V_Zeroes_ptr,
+            PBS_token_ids_ptr, num_blocks, num_q_heads, num_kv_heads, head_dim,
+            attn_output_ptr, mean_attn_weights_ptr, k_group_size
+        );
+    } else {
+        const float* PBS_K_Scales_ptr = get_contiguous_ptr<const float>(PBS_K_Scales_obj, "PBS_K_Scales", false, num_blocks == 0);
+        const float* PBS_K_Zeroes_ptr = get_contiguous_ptr<const float>(PBS_K_Zeroes_obj, "PBS_K_Zeroes", false, num_blocks == 0);
+        const float* PBS_V_Scales_ptr = get_contiguous_ptr<const float>(PBS_V_Scales_obj, "PBS_V_Scales", false, num_blocks == 0);
+        const float* PBS_V_Zeroes_ptr = get_contiguous_ptr<const float>(PBS_V_Zeroes_obj, "PBS_V_Zeroes", false, num_blocks == 0);
+
+        py::gil_scoped_release release;
+        fused_attention_decode_avx2(
+            Q_ptr, dense_K_ptr, dense_V_ptr, dense_count,
+            PBS_K_Packed_ptr, PBS_K_Scales_ptr, PBS_K_Zeroes_ptr,
+            PBS_V_Packed_ptr, PBS_V_Scales_ptr, PBS_V_Zeroes_ptr,
+            PBS_token_ids_ptr, num_blocks, num_q_heads, num_kv_heads, head_dim,
+            attn_output_ptr, mean_attn_weights_ptr, k_group_size
         );
     }
 }
@@ -172,16 +183,31 @@ static void py_quantize_k_block(
     py::object scale_obj,
     py::object zero_obj,
     int num_heads,
-    int head_dim)
+    int head_dim,
+    int k_group_size = 16,
+    const std::string& pbs_metadata_dtype = "fp32")
 {
     const float* K_ptr = get_contiguous_ptr<const float>(K_obj, "K", false);
     uint32_t* packed_ptr = reinterpret_cast<uint32_t*>(get_contiguous_ptr<int32_t>(packed_obj, "packed", true));
-    float* scale_ptr = get_contiguous_ptr<float>(scale_obj, "scale", true);
-    float* zero_ptr = get_contiguous_ptr<float>(zero_obj, "zero", true);
 
-    {
+    bool is_fp16 = (pbs_metadata_dtype == "fp16");
+    if (py::hasattr(scale_obj, "dtype")) {
+        std::string dt_str = py::str(scale_obj.attr("dtype")).cast<std::string>();
+        if (dt_str.find("float16") != std::string::npos || dt_str.find("half") != std::string::npos) {
+            is_fp16 = true;
+        }
+    }
+
+    if (is_fp16) {
+        uint16_t* scale_ptr = get_contiguous_ptr<uint16_t>(scale_obj, "scale", true);
+        uint16_t* zero_ptr = get_contiguous_ptr<uint16_t>(zero_obj, "zero", true);
         py::gil_scoped_release release;
-        quantize_k_block_avx2(K_ptr, packed_ptr, scale_ptr, zero_ptr, num_heads, head_dim);
+        quantize_k_block_avx2(K_ptr, packed_ptr, scale_ptr, zero_ptr, num_heads, head_dim, k_group_size);
+    } else {
+        float* scale_ptr = get_contiguous_ptr<float>(scale_obj, "scale", true);
+        float* zero_ptr = get_contiguous_ptr<float>(zero_obj, "zero", true);
+        py::gil_scoped_release release;
+        quantize_k_block_avx2(K_ptr, packed_ptr, scale_ptr, zero_ptr, num_heads, head_dim, k_group_size);
     }
 }
 
@@ -191,16 +217,31 @@ static void py_quantize_v_block(
     py::object scale_obj,
     py::object zero_obj,
     int num_heads,
-    int head_dim)
+    int head_dim,
+    int chunk_size = 16,
+    const std::string& pbs_metadata_dtype = "fp32")
 {
     const float* V_ptr = get_contiguous_ptr<const float>(V_obj, "V", false);
     int32_t* packed_ptr = get_contiguous_ptr<int32_t>(packed_obj, "packed", true);
-    float* scale_ptr = get_contiguous_ptr<float>(scale_obj, "scale", true);
-    float* zero_ptr = get_contiguous_ptr<float>(zero_obj, "zero", true);
 
-    {
+    bool is_fp16 = (pbs_metadata_dtype == "fp16");
+    if (py::hasattr(scale_obj, "dtype")) {
+        std::string dt_str = py::str(scale_obj.attr("dtype")).cast<std::string>();
+        if (dt_str.find("float16") != std::string::npos || dt_str.find("half") != std::string::npos) {
+            is_fp16 = true;
+        }
+    }
+
+    if (is_fp16) {
+        uint16_t* scale_ptr = get_contiguous_ptr<uint16_t>(scale_obj, "scale", true);
+        uint16_t* zero_ptr = get_contiguous_ptr<uint16_t>(zero_obj, "zero", true);
         py::gil_scoped_release release;
-        quantize_v_block_avx2(V_ptr, packed_ptr, scale_ptr, zero_ptr, num_heads, head_dim);
+        quantize_v_block_avx2(V_ptr, packed_ptr, scale_ptr, zero_ptr, num_heads, head_dim, chunk_size);
+    } else {
+        float* scale_ptr = get_contiguous_ptr<float>(scale_obj, "scale", true);
+        float* zero_ptr = get_contiguous_ptr<float>(zero_obj, "zero", true);
+        py::gil_scoped_release release;
+        quantize_v_block_avx2(V_ptr, packed_ptr, scale_ptr, zero_ptr, num_heads, head_dim, chunk_size);
     }
 }
 
@@ -211,16 +252,31 @@ static void py_dequantize_k(
     py::object out_obj,
     int num_blocks,
     int num_heads,
-    int head_dim)
+    int head_dim,
+    int k_group_size = 16,
+    const std::string& pbs_metadata_dtype = "fp32")
 {
     const int32_t* packed_ptr = get_contiguous_ptr<const int32_t>(packed_obj, "packed", false);
-    const float* scale_ptr = get_contiguous_ptr<const float>(scale_obj, "scale", false);
-    const float* zero_ptr = get_contiguous_ptr<const float>(zero_obj, "zero", false);
     float* out_ptr = get_contiguous_ptr<float>(out_obj, "out", true);
 
-    {
+    bool is_fp16 = (pbs_metadata_dtype == "fp16");
+    if (py::hasattr(scale_obj, "dtype")) {
+        std::string dt_str = py::str(scale_obj.attr("dtype")).cast<std::string>();
+        if (dt_str.find("float16") != std::string::npos || dt_str.find("half") != std::string::npos) {
+            is_fp16 = true;
+        }
+    }
+
+    if (is_fp16) {
+        const uint16_t* scale_ptr = get_contiguous_ptr<const uint16_t>(scale_obj, "scale", false);
+        const uint16_t* zero_ptr = get_contiguous_ptr<const uint16_t>(zero_obj, "zero", false);
         py::gil_scoped_release release;
-        dequantize_k_avx2(packed_ptr, scale_ptr, zero_ptr, out_ptr, num_blocks, num_heads, head_dim);
+        dequantize_k_avx2(packed_ptr, scale_ptr, zero_ptr, out_ptr, num_blocks, num_heads, head_dim, k_group_size);
+    } else {
+        const float* scale_ptr = get_contiguous_ptr<const float>(scale_obj, "scale", false);
+        const float* zero_ptr = get_contiguous_ptr<const float>(zero_obj, "zero", false);
+        py::gil_scoped_release release;
+        dequantize_k_avx2(packed_ptr, scale_ptr, zero_ptr, out_ptr, num_blocks, num_heads, head_dim, k_group_size);
     }
 }
 
@@ -231,14 +287,28 @@ static void py_dequantize_v(
     py::object out_obj,
     int total_tokens,
     int num_heads,
-    int head_dim)
+    int head_dim,
+    const std::string& pbs_metadata_dtype = "fp32")
 {
     const int32_t* packed_ptr = get_contiguous_ptr<const int32_t>(packed_obj, "packed", false);
-    const float* scale_ptr = get_contiguous_ptr<const float>(scale_obj, "scale", false);
-    const float* zero_ptr = get_contiguous_ptr<const float>(zero_obj, "zero", false);
     float* out_ptr = get_contiguous_ptr<float>(out_obj, "out", true);
 
-    {
+    bool is_fp16 = (pbs_metadata_dtype == "fp16");
+    if (py::hasattr(scale_obj, "dtype")) {
+        std::string dt_str = py::str(scale_obj.attr("dtype")).cast<std::string>();
+        if (dt_str.find("float16") != std::string::npos || dt_str.find("half") != std::string::npos) {
+            is_fp16 = true;
+        }
+    }
+
+    if (is_fp16) {
+        const uint16_t* scale_ptr = get_contiguous_ptr<const uint16_t>(scale_obj, "scale", false);
+        const uint16_t* zero_ptr = get_contiguous_ptr<const uint16_t>(zero_obj, "zero", false);
+        py::gil_scoped_release release;
+        dequantize_v_avx2(packed_ptr, scale_ptr, zero_ptr, out_ptr, total_tokens, num_heads, head_dim);
+    } else {
+        const float* scale_ptr = get_contiguous_ptr<const float>(scale_obj, "scale", false);
+        const float* zero_ptr = get_contiguous_ptr<const float>(zero_obj, "zero", false);
         py::gil_scoped_release release;
         dequantize_v_avx2(packed_ptr, scale_ptr, zero_ptr, out_ptr, total_tokens, num_heads, head_dim);
     }
@@ -287,27 +357,33 @@ PYBIND11_MODULE(_C, m) {
         py::arg("head_dim"),
         py::arg("attn_output_ptr"),
         py::arg("mean_attn_weights_ptr") = py::none(),
+        py::arg("k_group_size") = 16,
+        py::arg("pbs_metadata_dtype") = "fp32",
         "Fused streaming decode attention over dense KV and 2-bit compressed PBS KV without intermediate materialization."
     );
 
     // Standalone AVX2 quantization functions
     m.def("quantize_k_block", &py_quantize_k_block,
           py::arg("K"), py::arg("packed"), py::arg("scale"), py::arg("zero"), py::arg("num_heads"), py::arg("head_dim"),
+          py::arg("k_group_size") = 16, py::arg("pbs_metadata_dtype") = "fp32",
           "AVX2-accelerated 2-bit channel-wise quantization for Key 16-token blocks.");
     m.def("quantize_v_block", &py_quantize_v_block,
           py::arg("V"), py::arg("packed"), py::arg("scale"), py::arg("zero"), py::arg("num_heads"), py::arg("head_dim"),
+          py::arg("chunk_size") = 16, py::arg("pbs_metadata_dtype") = "fp32",
           "AVX2-accelerated 2-bit token-wise quantization for Value 16-token blocks.");
     m.def("dequantize_k", &py_dequantize_k,
           py::arg("packed"), py::arg("scale"), py::arg("zero"), py::arg("out"), py::arg("num_blocks"), py::arg("num_heads"), py::arg("head_dim"),
+          py::arg("k_group_size") = 16, py::arg("pbs_metadata_dtype") = "fp32",
           "AVX2-accelerated dequantization for Key blocks.");
     m.def("dequantize_v", &py_dequantize_v,
           py::arg("packed"), py::arg("scale"), py::arg("zero"), py::arg("out"), py::arg("total_tokens"), py::arg("num_heads"), py::arg("head_dim"),
+          py::arg("pbs_metadata_dtype") = "fp32",
           "AVX2-accelerated dequantization for Value tokens.");
 
     // TriTierCacheEngine class
     py::class_<TriTierCacheEngine>(m, "TriTierCacheEngine")
         .def(
-            py::init<int, int, int, int, int, int, float, float, int>(),
+            py::init<int, int, int, int, int, int, float, float, int, int, const std::string&>(),
             py::arg("num_q_heads"),
             py::arg("num_kv_heads"),
             py::arg("head_dim"),
@@ -316,7 +392,9 @@ PYBIND11_MODULE(_C, m) {
             py::arg("rw_size") = 64,
             py::arg("h_ratio") = 0.1f,
             py::arg("score_decay") = 0.999f,
-            py::arg("update_interval") = 16
+            py::arg("update_interval") = 16,
+            py::arg("k_group_size") = 16,
+            py::arg("pbs_metadata_dtype") = "fp16"
         )
         .def(
             "step",
@@ -365,6 +443,11 @@ PYBIND11_MODULE(_C, m) {
         .def_readonly("h_ratio", &TriTierCacheEngine::h_ratio)
         .def_readonly("score_decay", &TriTierCacheEngine::score_decay)
         .def_readonly("update_interval", &TriTierCacheEngine::update_interval)
+        .def_readonly("k_group_size", &TriTierCacheEngine::k_group_size)
+        .def_readonly("chunk_size", &TriTierCacheEngine::chunk_size)
+        .def_readonly("pbs_metadata_dtype", &TriTierCacheEngine::pbs_metadata_dtype)
+        .def_readonly("use_fp16_meta", &TriTierCacheEngine::use_fp16_meta)
+        .def_readonly("pbs_allocated_blocks", &TriTierCacheEngine::pbs_allocated_blocks)
         .def_readonly("s_count", &TriTierCacheEngine::s_count)
         .def_readonly("rw_count", &TriTierCacheEngine::rw_count)
         .def_readonly("rw_head_index", &TriTierCacheEngine::rw_head_index)
@@ -458,5 +541,87 @@ PYBIND11_MODULE(_C, m) {
                 self.HH_scores.data(),
                 py::cast(&self)
             );
-        }, "Zero-copy NumPy array wrapper around Heavy Hitter scores.");
+        }, "Zero-copy NumPy array wrapper around Heavy Hitter scores.")
+        .def("get_PBS_K_Packed", [](TriTierCacheEngine& self) {
+            int words = self.k_group_size / 16;
+            return py::array_t<int32_t>(
+                {static_cast<ssize_t>(self.pbs_allocated_blocks), static_cast<ssize_t>(words), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(self.head_dim)},
+                self.PBS_K_Packed.data(),
+                py::cast(&self)
+            );
+        }, "Zero-copy NumPy array wrapper around PBS Key packed buffer.")
+        .def("get_PBS_K_Scales", [](TriTierCacheEngine& self) -> py::object {
+            if (self.use_fp16_meta) {
+                return py::array_t<uint16_t>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(self.head_dim)},
+                    self.PBS_K_Scales_fp16.data(),
+                    py::cast(&self)
+                );
+            } else {
+                return py::array_t<float>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(self.head_dim)},
+                    self.PBS_K_Scales_fp32.data(),
+                    py::cast(&self)
+                );
+            }
+        }, "Zero-copy NumPy array wrapper around PBS Key scales buffer.")
+        .def("get_PBS_K_Zeroes", [](TriTierCacheEngine& self) -> py::object {
+            if (self.use_fp16_meta) {
+                return py::array_t<uint16_t>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(self.head_dim)},
+                    self.PBS_K_Zeroes_fp16.data(),
+                    py::cast(&self)
+                );
+            } else {
+                return py::array_t<float>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(self.head_dim)},
+                    self.PBS_K_Zeroes_fp32.data(),
+                    py::cast(&self)
+                );
+            }
+        }, "Zero-copy NumPy array wrapper around PBS Key zeroes buffer.")
+        .def("get_PBS_V_Packed", [](TriTierCacheEngine& self) {
+            return py::array_t<int32_t>(
+                {static_cast<ssize_t>(self.pbs_allocated_blocks * self.chunk_size), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(self.quant_head_dim)},
+                self.PBS_V_Packed.data(),
+                py::cast(&self)
+            );
+        }, "Zero-copy NumPy array wrapper around PBS Value packed buffer.")
+        .def("get_PBS_V_Scales", [](TriTierCacheEngine& self) -> py::object {
+            if (self.use_fp16_meta) {
+                return py::array_t<uint16_t>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks * self.chunk_size), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(1)},
+                    self.PBS_V_Scales_fp16.data(),
+                    py::cast(&self)
+                );
+            } else {
+                return py::array_t<float>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks * self.chunk_size), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(1)},
+                    self.PBS_V_Scales_fp32.data(),
+                    py::cast(&self)
+                );
+            }
+        }, "Zero-copy NumPy array wrapper around PBS Value scales buffer.")
+        .def("get_PBS_V_Zeroes", [](TriTierCacheEngine& self) -> py::object {
+            if (self.use_fp16_meta) {
+                return py::array_t<uint16_t>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks * self.chunk_size), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(1)},
+                    self.PBS_V_Zeroes_fp16.data(),
+                    py::cast(&self)
+                );
+            } else {
+                return py::array_t<float>(
+                    {static_cast<ssize_t>(self.pbs_allocated_blocks * self.chunk_size), static_cast<ssize_t>(self.num_kv_heads), static_cast<ssize_t>(1)},
+                    self.PBS_V_Zeroes_fp32.data(),
+                    py::cast(&self)
+                );
+            }
+        }, "Zero-copy NumPy array wrapper around PBS Value zeroes buffer.")
+        .def("get_PBS_token_ids", [](TriTierCacheEngine& self) {
+            return py::array_t<int64_t>(
+                {static_cast<ssize_t>(self.pbs_allocated_blocks * self.chunk_size)},
+                self.PBS_token_ids.data(),
+                py::cast(&self)
+            );
+        }, "Zero-copy NumPy array wrapper around PBS token IDs buffer.");
 }

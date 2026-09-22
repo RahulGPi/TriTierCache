@@ -49,6 +49,16 @@ def evaluate_perplexity_step_by_step(model, input_ids: torch.Tensor, max_eval_to
             else:
                 out = model(tok_in, position_ids=torch.tensor([[pos]], dtype=torch.int64))
                 past_kv = None
+                if pos == 0:
+                    for m in model.modules():
+                        if hasattr(m, "tri_tier_cache") and m.tri_tier_cache is not None:
+                            assert m.tri_tier_cache.k_group_size == patch_mod.K_GROUP_SIZE
+                            assert m.tri_tier_cache.pbs_metadata_dtype == patch_mod.PBS_METADATA_DTYPE
+                            if m.tri_tier_cache._engine is not None:
+                                assert m.tri_tier_cache._engine.k_group_size == patch_mod.K_GROUP_SIZE
+                                assert m.tri_tier_cache._engine.pbs_metadata_dtype == patch_mod.PBS_METADATA_DTYPE
+                                print(f"  [Verified C++ Engine Wiring] k_group_size={m.tri_tier_cache._engine.k_group_size}, pbs_metadata_dtype='{m.tri_tier_cache._engine.pbs_metadata_dtype}'", flush=True)
+                            break
 
             logits = out.logits[:, -1, :].float()
             log_probs = F.log_softmax(logits, dim=-1)
@@ -104,6 +114,9 @@ def benchmark_perplexity_suite(model_name: str = DEFAULT_MODEL_ID,
         # 2. TriTierCache
         patch_mod.R_SIZE = run_config.R_size
         patch_mod.H_RATIO = run_config.H_ratio
+        patch_mod.K_GROUP_SIZE = run_config.K_group_size
+        patch_mod.PBS_METADATA_DTYPE = run_config.pbs_metadata_dtype
+        patch_mod.SCORE_DECAY = 1.0 if run_config.hh_decay is None else run_config.hh_decay
         apply_patch()
         reset_caches(model_fp32)
         t_ppl = evaluate_perplexity_step_by_step(model_fp32, curr_input, max_eval_tokens=eval_len)
@@ -187,6 +200,9 @@ def benchmark_ablation_sweep(model_name: str = DEFAULT_MODEL_ID,
         for r_sz in r_sizes:
             patch_mod.H_RATIO = h_rat
             patch_mod.R_SIZE = r_sz
+            patch_mod.K_GROUP_SIZE = run_config.K_group_size
+            patch_mod.PBS_METADATA_DTYPE = run_config.pbs_metadata_dtype
+            patch_mod.SCORE_DECAY = 1.0 if run_config.hh_decay is None else run_config.hh_decay
 
             ppl_samples = []
             for s_idx, curr_input in enumerate(sample_inputs):
@@ -305,6 +321,9 @@ def benchmark_needle_in_a_haystack(model_name: str = DEFAULT_MODEL_ID,
             # 2. TriTierCache
             patch_mod.R_SIZE = run_config.R_size
             patch_mod.H_RATIO = run_config.H_ratio
+            patch_mod.K_GROUP_SIZE = run_config.K_group_size
+            patch_mod.PBS_METADATA_DTYPE = run_config.pbs_metadata_dtype
+            patch_mod.SCORE_DECAY = 1.0 if run_config.hh_decay is None else run_config.hh_decay
             apply_patch()
             reset_caches(model)
             tritier_out, _ = generate_step_by_step(model, input_ids, max_new_tokens=5)
@@ -365,7 +384,16 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="benchmarks/results", help="Output directory for CSVs")
     parser.add_argument("--quick", action="store_true", help="Run quick benchmark")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--k-group-size", type=int, default=16, choices=[16, 32], help="K channel group size")
+    parser.add_argument("--pbs-metadata-dtype", type=str, default="fp16", choices=["fp16", "fp32"], help="PBS metadata dtype")
+    parser.add_argument("--hh-decay", type=float, default=None, help="HH decay factor (e.g. 0.999 or None)")
     args = parser.parse_args()
 
-    run_cfg = RunConfig(model_id=args.model, seed=args.seed)
+    run_cfg = RunConfig(
+        model_id=args.model,
+        seed=args.seed,
+        K_group_size=args.k_group_size,
+        pbs_metadata_dtype=args.pbs_metadata_dtype,
+        hh_decay=args.hh_decay
+    )
     run_benchmark(model_name=args.model, output_dir=args.output_dir, quick=args.quick, run_config=run_cfg)
