@@ -62,6 +62,9 @@ def evaluate_config_numerical_drift(model,
     # 2. Configure and Run TriTierCache
     patch_mod.R_SIZE = run_cfg.R_size
     patch_mod.H_RATIO = run_cfg.H_ratio
+    patch_mod.K_GROUP_SIZE = run_cfg.K_group_size
+    patch_mod.PBS_METADATA_DTYPE = run_cfg.pbs_metadata_dtype
+    patch_mod.SCORE_DECAY = 1.0 if run_cfg.hh_decay is None else float(run_cfg.hh_decay)
     apply_patch()
     reset_caches(model)
 
@@ -70,6 +73,15 @@ def evaluate_config_numerical_drift(model,
 
     with torch.no_grad():
         out = model(curr_ids)
+
+        # Verification assertion: Confirm C++ engine received exact runtime config
+        first_layer = model.model.layers[0].self_attn
+        assert hasattr(first_layer, "tri_tier_cache"), "tri_tier_cache was not initialized on model layer"
+        eng = first_layer.tri_tier_cache._engine
+        if eng is not None:
+            assert eng.k_group_size == run_cfg.K_group_size, f"Wiring error: eng.k_group_size={eng.k_group_size} != {run_cfg.K_group_size}"
+            assert eng.pbs_metadata_dtype == run_cfg.pbs_metadata_dtype, f"Wiring error: eng.pbs_metadata_dtype={eng.pbs_metadata_dtype} != {run_cfg.pbs_metadata_dtype}"
+
         for step in range(decode_steps):
             last_logits = out.logits[:, -1, :].clone().float()
             tritier_logits.append(last_logits)
@@ -81,8 +93,8 @@ def evaluate_config_numerical_drift(model,
             if run_cfg.rope_mode == "a":
                 pos_tensor = torch.tensor([[pos]], dtype=torch.int64)
             else:
-                # StreamingLLM style: relative position capped within recent window + sinks
-                rel_pos = min(pos, run_cfg.R_size + 4)
+                # Mode 'b' (StreamingLLM style): position capped within recent window + sinks, advancing with decode steps
+                rel_pos = min(pos, run_cfg.R_size + 4 + step)
                 pos_tensor = torch.tensor([[rel_pos]], dtype=torch.int64)
 
             out = model(next_id, position_ids=pos_tensor)

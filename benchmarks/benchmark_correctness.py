@@ -63,6 +63,9 @@ def benchmark_top1_token_agreement(model_name: str,
         # 2. TriTierCache
         patch_mod.R_SIZE = run_config.R_size
         patch_mod.H_RATIO = run_config.H_ratio
+        patch_mod.K_GROUP_SIZE = run_config.K_group_size
+        patch_mod.PBS_METADATA_DTYPE = run_config.pbs_metadata_dtype
+        patch_mod.SCORE_DECAY = 1.0 if run_config.hh_decay is None else run_config.hh_decay
         apply_patch()
         reset_caches(model)
         tritier_ids, _ = generate_step_by_step(model, input_ids, max_new_tokens=gen_tokens)
@@ -116,6 +119,9 @@ def benchmark_numerical_drift(model_name: str,
         if use_tritier:
             patch_mod.R_SIZE = run_config.R_size
             patch_mod.H_RATIO = run_config.H_ratio
+            patch_mod.K_GROUP_SIZE = run_config.K_group_size
+            patch_mod.PBS_METADATA_DTYPE = run_config.pbs_metadata_dtype
+            patch_mod.SCORE_DECAY = 1.0 if run_config.hh_decay is None else run_config.hh_decay
             apply_patch()
         else:
             remove_patch()
@@ -181,12 +187,20 @@ def benchmark_numerical_drift(model_name: str,
 def run_benchmark(model_name: str = DEFAULT_MODEL_ID, 
                   output_dir: str = "benchmarks/results",
                   quick: bool = False,
+                  prompt_len: int = None,
+                  gen_tokens: int = None,
                   run_config: RunConfig = None) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     if run_config is None:
         run_config = RunConfig(model_id=model_name)
-    prompt_lens = [256] if quick else [4096, 16384]
-    gen_tokens = 50 if quick else 500
+
+    if prompt_len is not None:
+        prompt_lens = [prompt_len]
+    else:
+        prompt_lens = [256] if quick else [4096, 16384]
+
+    if gen_tokens is None:
+        gen_tokens = 50 if quick else 500
 
     # 1. Top-1 Token Agreement
     match_results = benchmark_top1_token_agreement(model_name, prompt_lengths=prompt_lens, gen_tokens=gen_tokens, run_config=run_config)
@@ -204,8 +218,26 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL_ID, help="Model name or path")
     parser.add_argument("--output-dir", type=str, default="benchmarks/results", help="Output directory for CSVs")
     parser.add_argument("--quick", action="store_true", help="Run quick benchmark")
+    parser.add_argument("--prompt-len", type=int, default=None, help="Prompt length to test")
+    parser.add_argument("--gen-tokens", type=int, default=None, help="Generated tokens to evaluate")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--k-group-size", type=int, default=16, choices=[16, 32], help="K channel group size")
+    parser.add_argument("--pbs-metadata-dtype", type=str, default="fp16", choices=["fp16", "fp32"], help="PBS metadata dtype")
+    parser.add_argument("--hh-decay", type=float, default=None, help="HH decay factor (e.g. 0.999 or None)")
     args = parser.parse_args()
 
-    run_cfg = RunConfig(model_id=args.model, seed=args.seed)
-    run_benchmark(model_name=args.model, output_dir=args.output_dir, quick=args.quick, run_config=run_cfg)
+    run_cfg = RunConfig(
+        model_id=args.model,
+        seed=args.seed,
+        K_group_size=args.k_group_size,
+        pbs_metadata_dtype=args.pbs_metadata_dtype,
+        hh_decay=args.hh_decay
+    )
+    run_benchmark(
+        model_name=args.model, 
+        output_dir=args.output_dir, 
+        quick=args.quick, 
+        prompt_len=args.prompt_len,
+        gen_tokens=args.gen_tokens,
+        run_config=run_cfg
+    )
