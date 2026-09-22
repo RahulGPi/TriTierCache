@@ -67,6 +67,8 @@ def run_decay_comparison(model_name: str = DEFAULT_MODEL_ID,
         patch_mod.R_SIZE = 256
         patch_mod.H_RATIO = 0.05
         patch_mod.SCORE_DECAY = score_decay
+        patch_mod.K_GROUP_SIZE = 16
+        patch_mod.PBS_METADATA_DTYPE = "fp16"
         apply_patch()
         reset_caches(model)
 
@@ -108,6 +110,8 @@ def run_decay_comparison(model_name: str = DEFAULT_MODEL_ID,
     print("-" * 115)
 
     for step in sorted(checkpoints):
+        if step > decode_steps:
+            continue
         set_u = hh_undecayed.get(step, set())
         set_d = hh_decayed.get(step, set())
 
