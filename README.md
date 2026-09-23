@@ -75,12 +75,12 @@ Measured on `meta-llama/Llama-3.2-1B` and `HuggingFaceTB/SmolLM-135M`, Linux x86
 
 Evaluated on long-context tasks (context $\ge 1024$ tokens) where $>75\%$ of KV tokens reside in Tier 3 (2-bit PBS). Baseline is uncompressed FP32 Vanilla Hugging Face Attention.
 
-#### `SmolLM-135M` (LLAMA arch, 135M)
+#### `TinyLlama-1.1B-Chat-v1.0` (LLAMA arch, 1100M)
 
 | Context | QA (TriTier / Base) | Tracking (TriTier / Base) | ICL (TriTier / Base) | Retention | Token Match | Decode Speed |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1,024** | **60.0%** / 80.0% | **20.0%** / 20.0% | **0.0%** / 0.0% | **91.7%** | 78.5% | 1.08x (39.3 ms) |
-| **2,048** | **0.0%** / 0.0% | **0.0%** / 0.0% | **0.0%** / 0.0% | **100.0%** | 54.0% | 1.06x (40.6 ms) |
+| **1,024** | **60.0%** / 80.0% | **90.0%** / 100.0% | **0.0%** / 0.0% | **88.3%** | 77.9% | 1.01x (194.8 ms) |
+| **2,048** | **0.0%** / 0.0% | **0.0%** / 0.0% | **0.0%** / 0.0% | **100.0%** | 57.9% | 0.99x (184.0 ms) |
 <!-- DOWNSTREAM_ACCURACY_END -->
 
 ---
