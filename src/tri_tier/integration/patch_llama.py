@@ -97,6 +97,10 @@ def patched_forward(self,
 
         K_tokens = K_new.squeeze(0).transpose(0, 1).contiguous()
         V_tokens = V_new.squeeze(0).transpose(0, 1).contiguous()
+        if hasattr(self, "capture_needle_pos") and self.capture_needle_pos is not None:
+            pos = self.capture_needle_pos
+            self.captured_needle_k = K_tokens[pos].clone()
+            self.captured_needle_v = V_tokens[pos].clone()
         cache.prefill(K_tokens, V_tokens)
 
         context_layer = context_layer.transpose(1, 2).reshape(bsz, q_len, -1)
