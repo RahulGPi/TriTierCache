@@ -30,7 +30,13 @@ from typing import Dict, List, Any, Tuple, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
-from benchmarks.common import load_model, set_seed, save_results_to_csv, DEFAULT_MODEL_ID
+from benchmarks.common import (
+    load_model,
+    set_seed,
+    save_results_to_csv,
+    measure_cache_bytes,
+    DEFAULT_MODEL_ID,
+)
 from benchmarks.utils import generate_step_by_step
 from benchmarks.corpus import CORPUS_PARAGRAPHS
 from src.tri_tier.integration.patch_model import apply_patch, remove_patch, reset_caches
@@ -398,6 +404,21 @@ def run_accuracy_benchmark(model_name: str,
             t_lat = sum(tritier_lats) / len(tritier_lats) if tritier_lats else 0.0
             speedup = (v_lat / t_lat) if t_lat > 0 else 1.0
 
+            # Exact KV cache memory accounting difference
+            mem_info = measure_cache_bytes(
+                total_tokens=ctx_len,
+                config=model.config,
+                sink_size=4,
+                r_size=256,
+                h_ratio=0.05,
+                k_group_size=16,
+                pbs_metadata_dtype="fp16",
+            )
+            v_mem_mb = mem_info["vanilla_fp32_mb"]
+            t_mem_mb = mem_info["total_mb"]
+            mem_ratio = mem_info["compression_ratio_vs_fp32"]
+            mem_saved_mb = v_mem_mb - t_mem_mb
+
             row = {
                 "model": model_name,
                 "model_arch": model_type,
@@ -409,6 +430,10 @@ def run_accuracy_benchmark(model_name: str,
                 "tritier_acc": t_acc,
                 "retention_pct": retention,
                 "token_match_pct": avg_match,
+                "vanilla_kv_mb": round(v_mem_mb, 2),
+                "tritier_kv_mb": round(t_mem_mb, 2),
+                "mem_saved_mb": round(mem_saved_mb, 2),
+                "mem_compression_ratio": round(mem_ratio, 2),
                 "vanilla_ms_tok": v_lat,
                 "tritier_ms_tok": t_lat,
                 "speedup": speedup,
@@ -416,7 +441,7 @@ def run_accuracy_benchmark(model_name: str,
             }
             results.append(row)
 
-            print(f"==> RESULT: {model_name} | {task_title} @ {ctx_len} ctx: Vanilla={v_acc:.1f}% | TriTier={t_acc:.1f}% | Retention={retention:.1f}% | TokenMatch={avg_match:.1f}% | Speedup={speedup:.2f}x")
+            print(f"==> RESULT: {model_name} | {task_title} @ {ctx_len} ctx: Vanilla={v_acc:.1f}% | TriTier={t_acc:.1f}% | Retention={retention:.1f}% | Memory={t_mem_mb:.1f}MB vs {v_mem_mb:.1f}MB ({mem_ratio:.1f}x) | Speedup={speedup:.2f}x")
 
     return results
 
@@ -522,7 +547,7 @@ def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] =
         for t in tasks:
             short_t = STANDARD_TASK_ABBR.get(t, t)
             headers.append(f"{short_t} (TriTier / Base)")
-        headers.extend(["Retention", "Token Match", "Decode Speed"])
+        headers.extend(["Retention", "Token Match", "KV Memory (TriTier / Base)", "Decode Speed"])
 
         table_lines.append("| " + " | ".join(headers) + " |")
         table_lines.append("| " + " | ".join([":---:"] * len(headers)) + " |")
@@ -548,11 +573,35 @@ def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] =
                 speed = sum(float(r.get("speedup", 1.0)) for r in eval_tasks) / len(eval_tasks)
                 lat = sum(float(r.get("tritier_ms_tok", 0.0)) for r in eval_tasks) / len(eval_tasks)
 
+                # KV Memory calculation
+                t_mem = None
+                v_mem = None
+                mem_ratio = None
+                for r in eval_tasks:
+                    if r.get("tritier_kv_mb") and r.get("vanilla_kv_mb"):
+                        t_mem = float(r["tritier_kv_mb"])
+                        v_mem = float(r["vanilla_kv_mb"])
+                        mem_ratio = float(r.get("mem_compression_ratio", v_mem / max(0.001, t_mem)))
+                        break
+                if t_mem is None:
+                    calc = measure_cache_bytes(
+                        total_tokens=ctx,
+                        num_layers=30 if "135" in model_name else 16,
+                        num_kv_heads=3 if "135" in model_name else 4,
+                        head_dim=64,
+                    )
+                    t_mem = calc["total_mb"]
+                    v_mem = calc["vanilla_fp32_mb"]
+                    mem_ratio = calc["compression_ratio_vs_fp32"]
+
+                mem_cell = f"**{t_mem:.1f} MB** / {v_mem:.1f} MB ({mem_ratio:.1f}x)"
+
                 row_cells.append(f"**{ret:.1f}%**")
                 row_cells.append(f"{match:.1f}%")
+                row_cells.append(mem_cell)
                 row_cells.append(f"{speed:.2f}x ({lat:.1f} ms)")
             else:
-                row_cells.extend(["-", "-", "-"])
+                row_cells.extend(["-", "-", "-", "-"])
 
             table_lines.append("| " + " | ".join(row_cells) + " |")
 
@@ -585,6 +634,55 @@ def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] =
         f.write(content)
 
     print(f"[README Updated] -> Downstream accuracy table updated in {resolved_path}")
+
+
+def save_and_merge_results_to_csv(filepath: str, new_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merges new benchmark rows into existing CSV without overwriting previous models."""
+    if not new_rows:
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                return list(csv.DictReader(f))
+        return []
+
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+    all_rows_map = {}
+    fieldnames = []
+    seen_fields = set()
+
+    # Read existing rows if present
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames:
+                    for fn in reader.fieldnames:
+                        if fn not in seen_fields:
+                            seen_fields.add(fn)
+                            fieldnames.append(fn)
+                for r in reader:
+                    k = (str(r.get("model")), str(r.get("context_length")), str(r.get("task")))
+                    all_rows_map[k] = r
+        except Exception as e:
+            print(f"Warning reading existing CSV {filepath}: {e}")
+
+    # Merge new rows (updating or adding)
+    for r in new_rows:
+        for k in r.keys():
+            if k not in seen_fields:
+                seen_fields.add(k)
+                fieldnames.append(k)
+        key = (str(r.get("model")), str(r.get("context_length")), str(r.get("task")))
+        all_rows_map[key] = r
+
+    merged_rows = list(all_rows_map.values())
+
+    with open(filepath, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(merged_rows)
+
+    print(f"[CSV Saved & Merged] -> {filepath} ({len(new_rows)} new/updated, {len(merged_rows)} total rows across models)")
+    return merged_rows
 
 
 # ---------------------------------------------------------------------------
@@ -650,10 +748,10 @@ def main():
         all_results.extend(model_results)
 
     if all_results:
-        save_results_to_csv(args.output_csv, all_results)
+        merged_all = save_and_merge_results_to_csv(args.output_csv, all_results)
 
         if args.update_readme:
-            update_readme_table(all_results, readme_path="README.md")
+            update_readme_table(merged_all, readme_path="README.md")
 
 
 if __name__ == "__main__":
