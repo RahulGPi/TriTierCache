@@ -6,13 +6,13 @@ dist/
 wheels/
 *.egg-info/
 .pytest_cache/
-
+*.pt
 *.sh
 # Virtual environments
 .venv/
 env/
 venv/
-
+scratch/*
 # C / C++ Compiled Objects & Libraries
 *.o
 *.obj
