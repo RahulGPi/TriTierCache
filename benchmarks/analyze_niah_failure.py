@@ -166,7 +166,7 @@ def analyze_needle_storage_fidelity(model,
         # Check Recent Window
         elif target_tok_id >= (eng.total_processed_tokens - eng.rw_count):
             tier_counts["rw"] += 1
-            rw_idx = target_tok_id % eng.rw_size
+            rw_idx = (eng.rw_head_index + target_tok_id - eng.total_processed_tokens) % eng.rw_size
             rw_k = torch.from_numpy(eng.get_RW_K())
             rw_v = torch.from_numpy(eng.get_RW_V())
             recon_k = rw_k[rw_idx]

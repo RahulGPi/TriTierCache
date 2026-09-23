@@ -155,6 +155,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TriTierCache Memory Footprint & Compression Benchmark")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL_ID, help="Model name or checkpoint path")
     parser.add_argument("--output-dir", type=str, default="benchmarks/results", help="Output directory for CSVs")
+    parser.add_argument("--k-group-size", type=int, default=16, help="K channel quantization group size (16 or 32)")
+    parser.add_argument("--pbs-metadata-dtype", type=str, default="fp32", choices=["fp16", "fp32"], help="Metadata dtype")
     args = parser.parse_args()
 
-    run_benchmark(model_id=args.model, output_dir=args.output_dir)
+    run_cfg = RunConfig(
+        model_id=args.model,
+        K_group_size=args.k_group_size,
+        pbs_metadata_dtype=args.pbs_metadata_dtype,
+    )
+    run_benchmark(model_id=args.model, output_dir=args.output_dir, run_config=run_cfg)
+
