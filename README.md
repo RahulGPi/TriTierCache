@@ -68,10 +68,24 @@ Measured on `meta-llama/Llama-3.2-1B` and `HuggingFaceTB/SmolLM-135M`, Linux x86
 | **Autoregressive Agreement** | 500 generated tokens from 4096 prompt | 100.0% | **92.40%** (462/500, Config A)<br>**91.60%** (458/500, Config B) | Step 24 div (Config A)<br>Step 14 div (Config B) |
 | **NIAH Retrieval (Llama 8k–16k)** | Needle retrieval across $1.0\times$–$2.0\times$ base | 27/27 (100.0%) | **54/54 (100.0%)** (Mode 'a') | **Flawless 100% retrieval** up to $2.0\times$ base |
 | **NIAH Retrieval (SmolLM 2k–3k)** | Needle retrieval across $1.0\times$–$1.5\times$ base | 6/21 (28.6%) | **8/42 (19.0%)** (Mode 'a') | 100% @ 1.0x & 1.1x (RW); model-level cliff @ 1.2x+ |
-
 ---
 
-### Long-Context Retrieval (Needle-In-A-Haystack Across Extended Contexts)
+<!-- DOWNSTREAM_ACCURACY_START -->
+### Downstream Long-Context Task Accuracy
+
+Evaluated on long-context tasks (context $\ge 1024$ tokens) where $>75\%$ of KV tokens reside in Tier 3 (2-bit PBS). Baseline is uncompressed FP32 Vanilla Hugging Face Attention.
+
+| Model | Arch | Context | Task | Vanilla Base | TriTierCache | Retention | Token Match | Decode Speed |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SmolLM-135M` | LLAMA | 1024 | Long-Context QA | 80.0% | **60.0%** | **75.0%** | 70.0% | 1.07x (39.0 ms) |
+| `SmolLM-135M` | LLAMA | 1024 | Multi-Variable Tracking | 20.0% | **20.0%** | **100.0%** | 68.8% | 1.07x (39.7 ms) |
+| `SmolLM-135M` | LLAMA | 1024 | Many-Shot ICL | 0.0% | **0.0%** | **100.0%** | 96.7% | 1.10x (39.3 ms) |
+| `SmolLM-135M` | LLAMA | 2048 | Long-Context QA | 0.0% | **0.0%** | **100.0%** | 60.8% | 1.04x (40.2 ms) |
+| `SmolLM-135M` | LLAMA | 2048 | Multi-Variable Tracking | 0.0% | **0.0%** | **100.0%** | 41.2% | 1.05x (42.2 ms) |
+| `SmolLM-135M` | LLAMA | 2048 | Many-Shot ICL | 0.0% | **0.0%** | **100.0%** | 60.0% | 1.11x (39.6 ms) |
+<!-- DOWNSTREAM_ACCURACY_END -->
+
+---
 
 Evaluated across both `meta-llama/Llama-3.2-1B` (base context 8192) and `HuggingFaceTB/SmolLM-135M` (base context 2048) using a diverse, non-repeating corpus (1,198 strictly unique paragraphs, >33k tokens, zero repeated 8-grams).
 

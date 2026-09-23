@@ -153,9 +153,8 @@ def generate_step_by_step(model, input_ids: torch.Tensor, max_new_tokens: int = 
     curr_ids = input_ids.clone()
     past_kv = None
     
-    from transformers.models.llama.modeling_llama import LlamaAttention
-    from src.tri_tier.integration.patch_llama import patched_forward
-    is_patched = (LlamaAttention.forward == patched_forward)
+    from src.tri_tier.integration.patch_model import is_patched as check_is_patched
+    is_patched = check_is_patched()
     
     with torch.no_grad():
         if not is_patched:
