@@ -75,14 +75,12 @@ Measured on `meta-llama/Llama-3.2-1B` and `HuggingFaceTB/SmolLM-135M`, Linux x86
 
 Evaluated on long-context tasks (context $\ge 1024$ tokens) where $>75\%$ of KV tokens reside in Tier 3 (2-bit PBS). Baseline is uncompressed FP32 Vanilla Hugging Face Attention.
 
-| Model | Arch | Context | Task | Vanilla Base | TriTierCache | Retention | Token Match | Decode Speed |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `SmolLM-135M` | LLAMA | 1024 | Long-Context QA | 80.0% | **60.0%** | **75.0%** | 70.0% | 1.07x (39.0 ms) |
-| `SmolLM-135M` | LLAMA | 1024 | Multi-Variable Tracking | 20.0% | **20.0%** | **100.0%** | 68.8% | 1.07x (39.7 ms) |
-| `SmolLM-135M` | LLAMA | 1024 | Many-Shot ICL | 0.0% | **0.0%** | **100.0%** | 96.7% | 1.10x (39.3 ms) |
-| `SmolLM-135M` | LLAMA | 2048 | Long-Context QA | 0.0% | **0.0%** | **100.0%** | 60.8% | 1.04x (40.2 ms) |
-| `SmolLM-135M` | LLAMA | 2048 | Multi-Variable Tracking | 0.0% | **0.0%** | **100.0%** | 41.2% | 1.05x (42.2 ms) |
-| `SmolLM-135M` | LLAMA | 2048 | Many-Shot ICL | 0.0% | **0.0%** | **100.0%** | 60.0% | 1.11x (39.6 ms) |
+#### `SmolLM-135M` (LLAMA arch, 135M)
+
+| Context | QA (TriTier / Base) | Tracking (TriTier / Base) | ICL (TriTier / Base) | Retention | Token Match | Decode Speed |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,024** | **60.0%** / 80.0% | **20.0%** / 20.0% | **0.0%** / 0.0% | **91.7%** | 78.5% | 1.08x (39.3 ms) |
+| **2,048** | **0.0%** / 0.0% | **0.0%** / 0.0% | **0.0%** / 0.0% | **100.0%** | 54.0% | 1.06x (40.6 ms) |
 <!-- DOWNSTREAM_ACCURACY_END -->
 
 ---

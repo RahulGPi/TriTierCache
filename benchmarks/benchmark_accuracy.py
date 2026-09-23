@@ -469,32 +469,96 @@ def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] =
                 key_map[k] = r
             all_rows = list(key_map.values())
 
+    STANDARD_TASK_ORDER = [
+        "Long-Context QA",
+        "Multi-Variable Tracking",
+        "Many-Shot ICL",
+    ]
+    STANDARD_TASK_ABBR = {
+        "Long-Context QA": "QA",
+        "Multi-Variable Tracking": "Tracking",
+        "Many-Shot ICL": "ICL",
+    }
+
+    # Group rows by model then context_length
+    by_model: Dict[str, Dict[int, Dict[str, Dict[str, Any]]]] = {}
+    for r in all_rows:
+        model_key = str(r["model"])
+        try:
+            ctx = int(r["context_length"])
+        except (ValueError, TypeError):
+            continue
+        task = str(r["task"])
+        if model_key not in by_model:
+            by_model[model_key] = {}
+        if ctx not in by_model[model_key]:
+            by_model[model_key][ctx] = {}
+        by_model[model_key][ctx][task] = r
+
     table_lines = [
         section_header,
         "",
         "Evaluated on long-context tasks (context $\\ge 1024$ tokens) where $>75\\%$ of KV tokens reside in Tier 3 (2-bit PBS). Baseline is uncompressed FP32 Vanilla Hugging Face Attention.",
         "",
-        "| Model | Arch | Context | Task | Vanilla Base | TriTierCache | Retention | Token Match | Decode Speed |",
-        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
     ]
 
-    for r in all_rows:
-        model_name = str(r["model"]).split("/")[-1]
-        arch = str(r.get("model_arch", "llama")).upper()
-        ctx = str(r["context_length"])
-        task = str(r["task"])
-        v_acc = float(r["vanilla_acc"])
-        t_acc = float(r["tritier_acc"])
-        ret = float(r["retention_pct"])
-        match = float(r["token_match_pct"])
-        speed = float(r.get("speedup", 1.0))
-        t_lat = float(r.get("tritier_ms_tok", 0.0))
+    for model_id, ctx_map in by_model.items():
+        model_name = model_id.split("/")[-1]
+        first_row = next(iter(next(iter(ctx_map.values())).values()))
+        arch = str(first_row.get("model_arch", "llama")).upper()
+        params = first_row.get("params_m", "")
+        param_str = f", {params}M" if params else ""
 
-        table_lines.append(
-            f"| `{model_name}` | {arch} | {ctx} | {task} | {v_acc:.1f}% | **{t_acc:.1f}%** | **{ret:.1f}%** | {match:.1f}% | {speed:.2f}x ({t_lat:.1f} ms) |"
-        )
+        model_tasks_set = {t for ctx_dict in ctx_map.values() for t in ctx_dict.keys()}
+        tasks = [t for t in STANDARD_TASK_ORDER if t in model_tasks_set]
+        for t in sorted(model_tasks_set):
+            if t not in tasks:
+                tasks.append(t)
 
-    table_block = f"{start_tag}\n" + "\n".join(table_lines) + f"\n{end_tag}"
+        table_lines.append(f"#### `{model_name}` ({arch} arch{param_str})")
+        table_lines.append("")
+
+        headers = ["Context"]
+        for t in tasks:
+            short_t = STANDARD_TASK_ABBR.get(t, t)
+            headers.append(f"{short_t} (TriTier / Base)")
+        headers.extend(["Retention", "Token Match", "Decode Speed"])
+
+        table_lines.append("| " + " | ".join(headers) + " |")
+        table_lines.append("| " + " | ".join([":---:"] * len(headers)) + " |")
+
+        for ctx in sorted(ctx_map.keys()):
+            task_data = ctx_map[ctx]
+            row_cells = [f"**{ctx:,}**"]
+
+            eval_tasks = []
+            for t in tasks:
+                r = task_data.get(t)
+                if r:
+                    eval_tasks.append(r)
+                    t_acc = float(r["tritier_acc"])
+                    v_acc = float(r["vanilla_acc"])
+                    row_cells.append(f"**{t_acc:.1f}%** / {v_acc:.1f}%")
+                else:
+                    row_cells.append("-")
+
+            if eval_tasks:
+                ret = sum(float(r["retention_pct"]) for r in eval_tasks) / len(eval_tasks)
+                match = sum(float(r["token_match_pct"]) for r in eval_tasks) / len(eval_tasks)
+                speed = sum(float(r.get("speedup", 1.0)) for r in eval_tasks) / len(eval_tasks)
+                lat = sum(float(r.get("tritier_ms_tok", 0.0)) for r in eval_tasks) / len(eval_tasks)
+
+                row_cells.append(f"**{ret:.1f}%**")
+                row_cells.append(f"{match:.1f}%")
+                row_cells.append(f"{speed:.2f}x ({lat:.1f} ms)")
+            else:
+                row_cells.extend(["-", "-", "-"])
+
+            table_lines.append("| " + " | ".join(row_cells) + " |")
+
+        table_lines.append("")
+
+    table_block = f"{start_tag}\n" + "\n".join(table_lines).rstrip() + f"\n{end_tag}"
 
     if start_tag in content and end_tag in content:
         start_idx = content.find(start_tag)

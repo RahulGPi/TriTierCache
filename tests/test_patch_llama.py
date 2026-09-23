@@ -214,7 +214,7 @@ class TestFullModelEndToEnd:
         input_ids = torch.tensor([[1]])  # single token prompt for auto-regressive decoding
 
         with torch.no_grad():
-            output = model.generate(input_ids, max_new_tokens=15, use_cache=True)
+            output = model.generate(input_ids, max_new_tokens=15, use_cache=True, eos_token_id=None)
 
         assert output.shape == (1, 16)
 
