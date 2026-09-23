@@ -12,7 +12,7 @@ wheels/
 .venv/
 env/
 venv/
-scratch/*
+scratch/
 # C / C++ Compiled Objects & Libraries
 *.o
 *.obj
