@@ -19,6 +19,7 @@ Supports:
 import os
 import re
 import sys
+import csv
 import time
 import math
 import random
@@ -177,6 +178,26 @@ ICL_DEMOS = [
     ("Sigma -> Strawberry", "Sigma", "Strawberry"),
     ("Tau -> Tomato", "Tau", "Tomato"),
     ("Upsilon -> Ugli", "Upsilon", "Ugli"),
+    ("Phi -> Fig", "Phi", "Fig"),
+    ("Chi -> Cherry", "Chi", "Cherry"),
+    ("Psi -> Papaya", "Psi", "Papaya"),
+    ("Omega -> Olive", "Omega", "Olive"),
+    ("Falcon -> Aviation", "Falcon", "Aviation"),
+    ("Cobalt -> Mineral", "Cobalt", "Mineral"),
+    ("Argon -> NobleGas", "Argon", "NobleGas"),
+    ("Orion -> Constellation", "Orion", "Constellation"),
+    ("Helios -> Solar", "Helios", "Solar"),
+    ("Chronos -> Temporal", "Chronos", "Temporal"),
+    ("Valkyrie -> Defense", "Valkyrie", "Defense"),
+    ("Nautilus -> Submarine", "Nautilus", "Submarine"),
+    ("Apex -> Peak", "Apex", "Peak"),
+    ("Nexus -> Connection", "Nexus", "Connection"),
+    ("Vortex -> Swirl", "Vortex", "Swirl"),
+    ("Zenith -> Pinnacle", "Zenith", "Pinnacle"),
+    ("Cipher -> Cryptography", "Cipher", "Cryptography"),
+    ("Prism -> Refraction", "Prism", "Refraction"),
+    ("Solstice -> Astronomy", "Solstice", "Astronomy"),
+    ("Eclipse -> Shadow", "Eclipse", "Shadow"),
 ]
 
 
@@ -184,61 +205,67 @@ def assemble_context(tokenizer,
                      target_token_len: int,
                      fact_text: str,
                      query_text: str,
-                     depth_ratio: float = 0.5) -> Tuple[str, int]:
+                     depth_ratio: float = 0.5,
+                     reserve_gen_tokens: int = 16) -> Tuple[str, int]:
     """
-    Pads background text around the fact such that total prompt tokens >= target_token_len
-    and the fact is positioned approximately at depth_ratio. Supports scaling up to 32k tokens.
+    Pads background text around the fact such that total prompt tokens <= target_token_len - reserve_gen_tokens,
+    guaranteeing prompt + generation tokens stay within target_token_len (preventing RoPE boundary collapse).
+    The fact is positioned approximately at depth_ratio. Supports scaling up to 32k tokens.
     """
-    corpus_idx = 0
+    prompt_budget = max(64, target_token_len - reserve_gen_tokens)
+    fixed_text = fact_text + "\n\n" + query_text
+    fixed_tokens = len(tokenizer(fixed_text).input_ids)
+    bg_budget = max(0, prompt_budget - fixed_tokens)
+    prefix_budget = int(bg_budget * depth_ratio)
+    suffix_budget = bg_budget - prefix_budget
+
     num_paras = len(CORPUS_PARAGRAPHS)
+    corpus_idx = 0
 
     prefix_paras = []
-    suffix_paras = []
-
-    # Estimate words needed (approx 0.75 words per token)
-    est_target_words = int(target_token_len * 0.75)
-    prefix_words_target = int(est_target_words * depth_ratio)
-    suffix_words_target = est_target_words - prefix_words_target
-
-    cur_prefix_words = 0
-    while cur_prefix_words < prefix_words_target:
+    cur_pre = 0
+    while cur_pre < prefix_budget and corpus_idx < num_paras:
         p = CORPUS_PARAGRAPHS[corpus_idx % num_paras]
+        p_len = len(tokenizer(p).input_ids)
+        if cur_pre + p_len > prefix_budget and prefix_paras:
+            break
         prefix_paras.append(p)
-        cur_prefix_words += len(p.split())
+        cur_pre += p_len
         corpus_idx += 1
 
-    cur_suffix_words = 0
-    while cur_suffix_words < suffix_words_target:
+    suffix_paras = []
+    cur_suf = 0
+    while cur_suf < suffix_budget and corpus_idx < num_paras * 2:
         p = CORPUS_PARAGRAPHS[corpus_idx % num_paras]
+        p_len = len(tokenizer(p).input_ids)
+        if cur_suf + p_len > suffix_budget and suffix_paras:
+            break
         suffix_paras.append(p)
-        cur_suffix_words += len(p.split())
+        cur_suf += p_len
         corpus_idx += 1
 
-    prompt_text = (
-        "\n\n".join(prefix_paras)
-        + "\n\n" + fact_text + "\n\n"
-        + "\n\n".join(suffix_paras)
-        + "\n\n" + query_text + " "
-    )
+    parts = []
+    if prefix_paras:
+        parts.append("\n\n".join(prefix_paras))
+    parts.append(fact_text)
+    if suffix_paras:
+        parts.append("\n\n".join(suffix_paras))
+    parts.append(query_text)
+    prompt_text = "\n\n".join(parts)
 
-    tokenized = tokenizer(prompt_text, return_tensors="pt").input_ids
-    actual_len = tokenized.shape[1]
-
-    # Fast bulk padding if short
-    while actual_len < target_token_len:
-        needed_tokens = target_token_len - actual_len
-        paras_to_add = max(1, needed_tokens // 25)
-        for _ in range(paras_to_add):
-            prefix_paras.append(CORPUS_PARAGRAPHS[corpus_idx % num_paras])
-            corpus_idx += 1
-        prompt_text = (
-            "\n\n".join(prefix_paras)
-            + "\n\n" + fact_text + "\n\n"
-            + "\n\n".join(suffix_paras)
-            + "\n\n" + query_text + " "
-        )
-        tokenized = tokenizer(prompt_text, return_tensors="pt").input_ids
-        actual_len = tokenized.shape[1]
+    actual_len = len(tokenizer(prompt_text).input_ids)
+    # If joiner tokens cause it to slightly overshoot prompt_budget, trim prefix paragraphs
+    while actual_len > prompt_budget and prefix_paras:
+        prefix_paras.pop(0)
+        parts = []
+        if prefix_paras:
+            parts.append("\n\n".join(prefix_paras))
+        parts.append(fact_text)
+        if suffix_paras:
+            parts.append("\n\n".join(suffix_paras))
+        parts.append(query_text)
+        prompt_text = "\n\n".join(parts)
+        actual_len = len(tokenizer(prompt_text).input_ids)
 
     return prompt_text, actual_len
 
@@ -256,7 +283,7 @@ def generate_task_samples(task: str,
             fact_stmt, query, ground_truth = QA_FACTS[i % len(QA_FACTS)]
             depth = depths[i % len(depths)]
             prompt, actual_len = assemble_context(
-                tokenizer, target_len, fact_stmt, query, depth_ratio=depth
+                tokenizer, target_len, fact_stmt, query, depth_ratio=depth, reserve_gen_tokens=16
             )
             samples.append({
                 "task": "Long-Context QA",
@@ -276,7 +303,7 @@ def generate_task_samples(task: str,
             fact_block = "System Network Configuration Parameters:\n" + "\n".join(all_defs)
             query = f"Question: What is the assigned value of CONFIG_{target_var}?\nAnswer: CONFIG_{target_var} ="
             prompt, actual_len = assemble_context(
-                tokenizer, target_len, fact_block, query, depth_ratio=0.5
+                tokenizer, target_len, fact_block, query, depth_ratio=0.5, reserve_gen_tokens=16
             )
             samples.append({
                 "task": "Multi-Variable Tracking",
@@ -288,21 +315,58 @@ def generate_task_samples(task: str,
             })
 
     elif task == "many_shot_icl":
+        reserve_gen = 8
         for i in range(num_samples):
             target_demo = ICL_DEMOS[i % len(ICL_DEMOS)]
-            demos_to_use = [d for d in ICL_DEMOS if d != target_demo]
-            demo_block = "Demonstrations:\n" + "\n".join([f"Item: {d[1]} -> Output: {d[2]}" for d in demos_to_use])
-            query = f"Item: {target_demo[1]} -> Output:"
-            prompt, actual_len = assemble_context(
-                tokenizer, target_len, demo_block, query, depth_ratio=0.7
-            )
+            target_key, target_val = target_demo[1], target_demo[2]
+
+            # Randomize order of demonstrations, ensuring target pair is included in the bank
+            random.seed(42 + i)
+            shuffled_demos = list(ICL_DEMOS)
+            random.shuffle(shuffled_demos)
+
+            demo_lines = ["Demonstrations:"]
+            for d in shuffled_demos:
+                demo_lines.append(f"Item: {d[1]} -> Output: {d[2]}")
+            demo_block = "\n".join(demo_lines)
+            query = f"Item: {target_key} -> Output:"
+
+            # Measure tokens needed for demo block + query
+            demo_query_text = demo_block + "\n\n" + query
+            demo_tokens = len(tokenizer(demo_query_text).input_ids)
+            needed_bg_tokens = max(0, target_len - reserve_gen - demo_tokens)
+
+            # Pad background text BEFORE the demonstrations so demonstrations directly precede the query
+            bg_paras = []
+            cur_bg_tokens = 0
+            c_idx = (i * 7) % len(CORPUS_PARAGRAPHS)
+            while cur_bg_tokens < needed_bg_tokens and c_idx < len(CORPUS_PARAGRAPHS):
+                p = CORPUS_PARAGRAPHS[c_idx % len(CORPUS_PARAGRAPHS)]
+                p_len = len(tokenizer(p).input_ids)
+                if cur_bg_tokens + p_len > needed_bg_tokens:
+                    break
+                bg_paras.append(p)
+                cur_bg_tokens += p_len
+                c_idx += 1
+
+            if bg_paras:
+                prompt = "\n\n".join(bg_paras) + "\n\n" + demo_query_text
+            else:
+                prompt = demo_query_text
+
+            actual_len = len(tokenizer(prompt).input_ids)
+            while actual_len > (target_len - reserve_gen) and bg_paras:
+                bg_paras.pop(0)
+                prompt = ("\n\n".join(bg_paras) + "\n\n" + demo_query_text) if bg_paras else demo_query_text
+                actual_len = len(tokenizer(prompt).input_ids)
+
             samples.append({
                 "task": "Many-Shot ICL",
                 "sample_id": i + 1,
                 "prompt": prompt,
                 "prompt_tokens": actual_len,
-                "ground_truth": target_demo[2],
-                "max_gen_tokens": 6,
+                "ground_truth": target_val,
+                "max_gen_tokens": 4,
             })
 
     return samples
