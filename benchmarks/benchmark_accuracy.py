@@ -283,7 +283,7 @@ def generate_task_samples(task: str,
             fact_stmt, query, ground_truth = QA_FACTS[i % len(QA_FACTS)]
             depth = depths[i % len(depths)]
             prompt, actual_len = assemble_context(
-                tokenizer, target_len, fact_stmt, query, depth_ratio=depth, reserve_gen_tokens=16
+                tokenizer, target_len, fact_stmt, query, depth_ratio=depth, reserve_gen_tokens=32
             )
             samples.append({
                 "task": "Long-Context QA",
@@ -291,19 +291,21 @@ def generate_task_samples(task: str,
                 "prompt": prompt,
                 "prompt_tokens": actual_len,
                 "ground_truth": ground_truth,
-                "max_gen_tokens": 12,
+                "max_gen_tokens": 24,
             })
 
     elif task == "multi_variable":
+        depths = [0.20, 0.40, 0.60, 0.75, 0.85]
         for i in range(num_samples):
             target_var, target_val = VARIABLE_TEMPLATES[i % len(VARIABLE_TEMPLATES)]
+            depth = depths[i % len(depths)]
             all_defs = [f"CONFIG_{k} = {v};" for k, v in VARIABLE_TEMPLATES]
             random.seed(42 + i)
             random.shuffle(all_defs)
             fact_block = "System Network Configuration Parameters:\n" + "\n".join(all_defs)
             query = f"Question: What is the assigned value of CONFIG_{target_var}?\nAnswer: CONFIG_{target_var} ="
             prompt, actual_len = assemble_context(
-                tokenizer, target_len, fact_block, query, depth_ratio=0.5, reserve_gen_tokens=16
+                tokenizer, target_len, fact_block, query, depth_ratio=depth, reserve_gen_tokens=24
             )
             samples.append({
                 "task": "Multi-Variable Tracking",
@@ -311,11 +313,11 @@ def generate_task_samples(task: str,
                 "prompt": prompt,
                 "prompt_tokens": actual_len,
                 "ground_truth": target_val,
-                "max_gen_tokens": 8,
+                "max_gen_tokens": 16,
             })
 
     elif task == "many_shot_icl":
-        reserve_gen = 8
+        reserve_gen = 16
         for i in range(num_samples):
             target_demo = ICL_DEMOS[i % len(ICL_DEMOS)]
             target_key, target_val = target_demo[1], target_demo[2]
@@ -366,7 +368,7 @@ def generate_task_samples(task: str,
                 "prompt": prompt,
                 "prompt_tokens": actual_len,
                 "ground_truth": target_val,
-                "max_gen_tokens": 4,
+                "max_gen_tokens": 6,
             })
 
     return samples
