@@ -509,6 +509,18 @@ def run_accuracy_benchmark(model_name: str,
 
             print(f"==> RESULT: {model_name} | {task_title} @ {ctx_len} ctx: Vanilla={v_acc:.1f}% | TriTier={t_acc:.1f}% | Retention={retention:.1f}% | Memory={t_mem_mb:.1f}MB vs {v_mem_mb:.1f}MB ({mem_ratio:.1f}x) | Speedup={speedup:.2f}x")
 
+    remove_patch()
+    try:
+        reset_caches(model)
+        del model
+        del tokenizer
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return results
 
 
@@ -528,7 +540,7 @@ def get_readme_path(custom_path: Optional[str] = None) -> str:
     return os.path.abspath("README.md")
 
 
-def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] = None) -> None:
+def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] = None, csv_path: Optional[str] = None) -> None:
     """Inserts or updates the Downstream Long-Context Task Accuracy table in README.md."""
     resolved_path = get_readme_path(readme_path)
     if not os.path.exists(resolved_path):
@@ -543,8 +555,9 @@ def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] =
     section_header = "### Downstream Long-Context Task Accuracy"
 
     # Read existing CSV rows if present to combine models
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(script_dir, "results", "accuracy_results.csv")
+    if csv_path is None or not os.path.exists(csv_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.join(script_dir, "results", "accuracy_results.csv")
     all_rows = list(rows)
     if os.path.exists(csv_path):
         import csv
@@ -803,21 +816,44 @@ def main():
         print(f" - {m}")
 
     all_results = []
-    for model_id in deduped_models:
-        model_results = run_accuracy_benchmark(
-            model_name=model_id,
-            context_lens=args.context_lens,
-            tasks=selected_tasks,
-            samples_per_task=args.samples_per_task,
-            seed=args.seed,
-        )
-        all_results.extend(model_results)
+    for model_idx, model_id in enumerate(deduped_models, 1):
+        print(f"\n{'=' * 80}")
+        print(f"[{model_idx}/{len(deduped_models)}] Evaluating Model: {model_id}")
+        print(f"{'=' * 80}")
+
+        try:
+            model_results = run_accuracy_benchmark(
+                model_name=model_id,
+                context_lens=args.context_lens,
+                tasks=selected_tasks,
+                samples_per_task=args.samples_per_task,
+                seed=args.seed,
+            )
+        except Exception as e:
+            print(f"\n[ERROR] Benchmark run failed for model '{model_id}': {e}")
+            import traceback
+            traceback.print_exc()
+            model_results = []
+
+        if model_results:
+            all_results.extend(model_results)
+            merged_all = save_and_merge_results_to_csv(args.output_csv, model_results)
+
+            if args.update_readme:
+                update_readme_table(merged_all, readme_path="README.md", csv_path=args.output_csv)
+                print(f"[README Updated] Successfully updated README.md after model '{model_id}' ({model_idx}/{len(deduped_models)})\n")
+
+        # Cleanup memory between models
+        remove_patch()
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if all_results:
-        merged_all = save_and_merge_results_to_csv(args.output_csv, all_results)
-
-        if args.update_readme:
-            update_readme_table(merged_all, readme_path="README.md")
+        print(f"\n[Completed] Finished benchmark run across {len(deduped_models)} models ({len(all_results)} new rows evaluated).")
+    else:
+        print(f"\n[Warning] No benchmark results were generated during this run.")
 
 
 if __name__ == "__main__":
