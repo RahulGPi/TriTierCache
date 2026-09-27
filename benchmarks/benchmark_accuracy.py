@@ -531,17 +531,19 @@ def run_accuracy_benchmark(model_name: str,
 def get_readme_path(custom_path: Optional[str] = None) -> str:
     if custom_path and os.path.exists(custom_path):
         return os.path.abspath(custom_path)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    bench_candidate = os.path.join(script_dir, "README.md")
+    if os.path.exists(bench_candidate):
+        return bench_candidate
+    if os.path.exists("benchmarks/README.md"):
+        return os.path.abspath("benchmarks/README.md")
     if os.path.exists("README.md"):
         return os.path.abspath("README.md")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidate = os.path.join(os.path.dirname(script_dir), "README.md")
-    if os.path.exists(candidate):
-        return candidate
-    return os.path.abspath("README.md")
+    return bench_candidate
 
 
 def update_readme_table(rows: List[Dict[str, Any]], readme_path: Optional[str] = None, csv_path: Optional[str] = None) -> None:
-    """Inserts or updates the Downstream Long-Context Task Accuracy table in README.md."""
+    """Inserts or updates the Downstream Long-Context Task Accuracy table in benchmarks/README.md."""
     resolved_path = get_readme_path(readme_path)
     if not os.path.exists(resolved_path):
         print(f"Warning: README.md not found at '{resolved_path}'. Skipping README update.")
@@ -840,8 +842,9 @@ def main():
             merged_all = save_and_merge_results_to_csv(args.output_csv, model_results)
 
             if args.update_readme:
-                update_readme_table(merged_all, readme_path="README.md", csv_path=args.output_csv)
-                print(f"[README Updated] Successfully updated README.md after model '{model_id}' ({model_idx}/{len(deduped_models)})\n")
+                target_path = get_readme_path()
+                update_readme_table(merged_all, readme_path=target_path, csv_path=args.output_csv)
+                print(f"[README Updated] Successfully updated {target_path} after model '{model_id}' ({model_idx}/{len(deduped_models)})\n")
 
         # Cleanup memory between models
         remove_patch()

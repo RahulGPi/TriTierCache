@@ -13,12 +13,13 @@ Implementation reference for the Python package and the native AVX2 extension. T
 7. [Native kernels](#7-native-kernels)
 8. [Fused decode attention](#8-fused-decode-attention)
 9. [Python to C++ ABI](#9-python-to-c-abi)
-10. [Integration layer](#10-integration-layer)
-11. [Build](#11-build)
-12. [Numerical contract](#12-numerical-contract)
-13. [Testing methodology](#13-testing-methodology)
-14. [Known limitations](#14-known-limitations)
-15. [Extension points](#15-extension-points)
+10. [Integration layer & Multi-model patching](#10-integration-layer--multi-model-patching)
+11. [Configuration parameters](#11-configuration-parameters)
+12. [Build](#12-build)
+13. [Numerical contract](#13-numerical-contract)
+14. [Testing methodology](#14-testing-methodology)
+15. [Known limitations](#15-known-limitations)
+16. [Extension points](#16-extension-points)
 
 ---
 
@@ -290,19 +291,76 @@ Add the assertions on the Python side before every `.data_ptr()` call. They are 
 
 ---
 
-## 10. Integration layer
+## 10. Integration layer & Multi-model patching
 
-`src/tri_tier/integration/patch_llama.py` monkey-patches `LlamaAttention.forward`.
+TriTierCache provides two integration interfaces:
+- `src/tri_tier/integration/patch_model.py`: Universal multi-model monkey-patcher supporting LLaMA, Mistral, and Qwen architectures.
+- `src/tri_tier/integration/patch_llama.py`: Specialized monkey-patcher targeting `LlamaAttention`.
 
-**Fused path** (extension present). Bypasses `reconstruct_full_cache()` entirely. Pulls Sink, RW and HH tiers plus the PBS buffers directly and hands pointers to the kernel. Valid because attention is order-invariant once RoPE has been applied upstream.
+### Supported Model Architectures
 
-**Reference path** (`_reference_attention_path`, extension absent). Calls `reconstruct_full_cache()`, which returns token-major `[total_len, H, D]`, then applies the GQA repeat and `.transpose(0, 1).unsqueeze(0)` to reach the `[1, num_q_heads, total_len, D]` layout attention expects. Note the layout is token-major, not head-major. Getting this backwards produces plausible-looking output with silently scrambled heads.
+| Architecture Class | Supported Families | Key Architectural Details |
+| :--- | :--- | :--- |
+| `LlamaAttention` | LLaMA 3, 3.1, 3.2, SmolLM, SmolLM2, TinyLlama | Standard RoPE, MHA / GQA (`head_dim=64, 128`) |
+| `MistralAttention` | Mistral-7B, Mistral-Instruct | Standard RoPE, GQA (`head_dim=128`), sliding window compatibility |
+| `Qwen2Attention` | Qwen 2, Qwen 2.5 | Standard RoPE, GQA (`head_dim=64, 128`), context capacity 32k+ |
+| `Qwen3Attention` | Qwen 3 (e.g., `Qwen3-0.6B`) | Per-head Q-K RMS normalization (`q_norm`, `k_norm`), 3D RoPE unsqueezing |
 
-**GQA.** Handled inside the kernel by index mapping, `kvh = qh / group_size`. It is deliberately not handled by `repeat_interleave` before the call, because that duplicates the entire KV tensor in memory and defeats the point of a streaming design.
+### Execution Flow in `patched_forward`
+
+1. **Lazy Initialization**: Upon the first forward pass through an attention module, a per-layer `TriTierCache` instance is lazily allocated and stored on the module as `self.tri_tier_cache`, sized to `max(32768, max_position_embeddings)`.
+2. **Projection & Q-K Normalization**:
+   ```python
+   q_proj = self.q_proj(hidden_states).view(bsz, q_len, num_q_heads, head_dim)
+   k_proj = self.k_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim)
+   v_proj = self.v_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim)
+
+   # Per-head RMSNorm (Qwen 3 architectural requirement)
+   if hasattr(self, "q_norm") and self.q_norm is not None:
+       q_proj = self.q_norm(q_proj)
+   if hasattr(self, "k_norm") and self.k_norm is not None:
+       k_proj = self.k_norm(k_proj)
+   ```
+3. **RoPE Rotary Application**:
+   RoPE is applied upstream to both $Q$ and newly arrived $K$. When position embeddings `cos`, `sin` are 3D (`[batch, seq_len, head_dim]`), they are unsqueezed to 4D (`[batch, 1, seq_len, head_dim]`) to broadcast correctly across all attention heads.
+4. **Prefill (`q_len > 1`)**:
+   Runs standard scaled dot-product attention (`torch.nn.functional.scaled_dot_product_attention`) across all prompt tokens for prompt ingestion, then bulk-ingests $K$ and $V$ via `cache.prefill(K_tokens.float(), V_tokens.float())`.
+5. **Decode (`q_len == 1`)**:
+   - **Fused Path (extension present, `cache._engine is not None`)**: Bypasses full cache reconstruction. Calls `cache.step(Q_flat, K_flat, V_flat, attn_output)`, passing pointers directly to `fused_attention_decode_avx2`. GQA mapping is handled natively inside the kernel via `kvh = qh / group_size`.
+   - **Reference Path (fallback or `output_attentions=True`)**: Ingests new $K, V$ into the Python cache via `cache.ingest_token(...)`, calls `cache.reconstruct_full_cache()`, repeats GQA heads along the KV dimension, runs PyTorch scaled dot-product, and updates cumulative attention scores via `cache.accumulate_attn_scrs(...)`.
+
+### Patch Management API
+
+```python
+from tri_tier.integration.patch_model import apply_patch, remove_patch, reset_caches, is_patched
+
+apply_patch()        # Monkey-patches all supported attention classes
+# ... run generation or benchmarks ...
+reset_caches(model)  # Frees per-layer TriTierCache instances
+remove_patch()       # Restores original Hugging Face attention forward methods
+```
 
 ---
 
-## 11. Build
+## 11. Configuration parameters
+
+All parameters can be tuned in `src/tri_tier/constants.py` or passed directly to `TriTierCache(...)`:
+
+| Parameter | Default | Supported / Options | Effect |
+| :--- | :--- | :--- | :--- |
+| `SINK_SIZE` | 4 | Integer | Pinned initial tokens. Anchors attention distribution; raising it costs exact-tier memory and rarely helps. |
+| `R_size` | 256 | Integer | Recent window size (ring buffer). The primary quality lever. Larger window improves local fidelity at the expense of FP32 memory. |
+| `H_ratio` | 0.05 | Float (0.0–1.0) | Fraction of sequence context preserved in FP32 heavy-hitter store (Tier 2). |
+| `CHUNK_SIZE` | 16 | Constant (16) | Number of tokens per packed PBS block. Fixed by the 2-bit-into-int32 packing format. Do not change. |
+| `max_seq_len` | 32768 | Integer | Maximum context length capacity. Sizes the global attention tracker and heavy-hitter budget. |
+| `K_GROUP_SIZE` | 16 | `16`, `32` | Key quantization channel grouping across head dimension. `16` delivers superior precision (0.957 K cosine similarity, Step 24 divergence); `32` halves scale/offset metadata storage (0.937 K cosine similarity, Step 14 divergence). |
+| `PBS_METADATA_DTYPE` | `"fp16"` | `"fp16"`, `"fp32"` | Storage format for quantization scales and zero-points in the Packed Block Store. `"fp16"` halves metadata memory footprint with $<0.015$ PPL impact compared to `"fp32"`. |
+| `ROPE_MODE` | `'a'` | `'a'`, `'b'` | Rotary position handling across cache tiers. Mode `'a'` retains absolute position IDs matching model pretraining (100% NIAH pass up to $2.0\times$ base on Llama-3.2-1B); Mode `'b'` clamps positions to recent window, causing query-key phase mismatch. |
+| `score_decay` | 0.999 | Float (0.0–1.0) | Exponential decay factor for tracking cumulative heavy-hitter token attention scores. Prevents transiently hot tokens from remaining in Tier 2 indefinitely. |
+
+---
+
+## 12. Build
 
 ```bash
 pip install -e .            # builds the extension via setup.py
@@ -334,7 +392,7 @@ OMP_NUM_THREADS=8 PYTHONPATH=src python benchmarks/benchmark_latency.py
 
 ---
 
-## 12. Numerical contract
+## 13. Numerical contract
 
 | Property | Value | Why it matters |
 | :--- | :--- | :--- |
@@ -349,7 +407,7 @@ Scale underflow is tracked as a standing check, `benchmarks/check_scale_underflo
 
 ---
 
-## 13. Testing methodology
+## 14. Testing methodology
 
 **Ground truth generation.** Two-script pipeline per kernel. `gen_ref_*.py` produces numpy ground truth. `gen_test_*.py` emits a compilable C++ test with expected values. For anything above toy scale, fixtures go to raw binary files read through ctypes rather than inline float arrays, because multi-megabyte literal arrays make the compiler unusable.
 
@@ -363,11 +421,11 @@ Scale underflow is tracked as a standing check, `benchmarks/check_scale_underflo
 PYTHONPATH=src pytest -v
 ```
 
-`test_cache_init.py` covers buffer sizing including the `num_blocks * CHUNK_SIZE` rule. `test_cache_methods.py` covers ingestion, tier routing, promotion and demotion, and score accumulation. `test_patch_llama.py` covers the patch and GQA head mapping.
+`test_cache_init.py` covers buffer sizing including the `num_blocks * CHUNK_SIZE` rule. `test_cache_methods.py` covers ingestion, tier routing, promotion and demotion, and score accumulation. `test_patch_llama.py` and `test_multi_model_patch.py` cover patching and GQA head mapping across LLaMA, Mistral, and Qwen.
 
 ---
 
-## 14. Known limitations
+## 15. Known limitations
 
 | Issue | Impact | Status |
 | :--- | :--- | :--- |
@@ -380,7 +438,7 @@ PYTHONPATH=src pytest -v
 
 ---
 
-## 15. Extension points
+## 16. Extension points
 
 **AVX-VNNI integer attention.** `_mm256_dpbusd_epi32` computes `Q · K_quant` in the integer domain with no FP32 reconstruction. Held, not abandoned. The blockers are real: there is no Python reference implementation to verify against, the Q-quantization scheme and the rescale math are open design questions, and for a `batch=1` decode workload the kernel is probably memory-bound rather than compute-bound, which means the payoff may be small. Build the Python reference first, then the kernel.
 
