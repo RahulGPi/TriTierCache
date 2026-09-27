@@ -9,15 +9,15 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
     LlamaForCausalLM,
 )
-from src.tri_tier.integration.patch_llama import (
+from tri_tier.integration.patch_llama import (
     apply_patch,
     patched_forward,
     MAX_SEQ_LEN,
     R_SIZE,
     H_RATIO,
 )
-from src.tri_tier.cache import TriTierCache
-from src.tri_tier.constants import SINK_SIZE, CHUNK_SIZE
+from tri_tier.cache import TriTierCache
+from tri_tier.constants import SINK_SIZE, CHUNK_SIZE
 
 
 @pytest.fixture(autouse=True)

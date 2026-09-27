@@ -4,9 +4,10 @@
 
 **A hierarchical, memory-compressed KV cache for long-context LLM inference on consumer CPUs.**
 
-[![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
+[![PyPI version](https://img.shields.io/pypi/v/tri-tier.svg?color=blue)](https://pypi.org/project/tri-tier/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-ee4c2c.svg)](https://pytorch.org/)
-[![Transformers](https://img.shields.io/badge/Transformers-LLaMA%20%7C%20SmolLM-yellow.svg)](https://github.com/huggingface/transformers)
+[![Transformers](https://img.shields.io/badge/Transformers-LLaMA%20%7C%20Mistral%20%7C%20Qwen-yellow.svg)](https://github.com/huggingface/transformers)
 [![SIMD](https://img.shields.io/badge/SIMD-AVX2%20%7C%20FMA%20%7C%20BMI2%20%7C%20OpenMP-0071C5.svg)](https://www.intel.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -76,23 +77,35 @@ TriTierCache delivers up to **7.1x memory reduction** and **2.81x faster decode 
 
 ## Install
 
+### From PyPI
+
+```bash
+pip install tri-tier
+```
+
+For running comprehensive benchmarks and evaluation suites:
+```bash
+pip install "tri-tier[benchmark]"
+```
+
+Verify your installation and CPU acceleration support:
+```bash
+tri-tier --check
+```
+
+### From Source
+
 Requirements: Linux x86_64 with AVX2, FMA and BMI2; GCC 9 or newer with OpenMP; Python 3.10+; PyTorch 2.1+.
 
 ```bash
 git clone https://github.com/RahulGPi/TriTierCache.git
 cd TriTierCache
 
-# Editable install, builds the C++ extension as part of the install
+# Editable install (compiles C++ extension with AVX2 & OpenMP)
 pip install -e .
 
-# Verify the native extension loaded
-python -c "import tri_tier._C as _C; print('extension ok:', _C.fused_attention_decode)"
-```
-
-Check your CPU has what the build needs:
-
-```bash
-lscpu | grep -o -E 'avx2|fma|bmi2' | sort -u
+# Verify the native extension and system compatibility
+tri-tier --check
 ```
 
 ## Quickstart

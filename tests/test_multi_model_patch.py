@@ -11,7 +11,7 @@ try:
 except ImportError:
     HAS_QWEN3 = False
 
-from src.tri_tier.integration.patch_model import (
+from tri_tier.integration.patch_model import (
     apply_patch,
     remove_patch,
     reset_caches,

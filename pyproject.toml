@@ -3,36 +3,70 @@ requires = ["setuptools>=64", "pybind11>=2.11"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tri_tier"
+name = "tri-tier"
 version = "0.1.0"
-description = "Tri Tier Cache system to reduce memory usage in longer contexts"
+description = "TriTierCache: High-performance tiered KV cache engine for LLMs with AVX2 fused attention"
 readme = "README.md"
 authors = [
     { name = "RahulGPi", email = "rahulgpai99@gmail.com" }
 ]
-license = { text = "MIT" }
-requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
 dependencies = [
-    "accelerate>=1.14.0",
-    "datasets>=5.0.1",
-    "ninja>=1.13.0",
-    "numpy>=2.5.2",
-    "psutil>=7.2.2",
-    "pybind11>=3.1.0",
-    "sentencepiece>=0.2.2",
-    "setuptools>=84.0.0",
-    "torch>=2.13.0",
-    "transformers>=5.16.1",
+    "torch>=2.1.0",
+    "transformers>=4.36.0",
+    "numpy>=1.24.0",
+    "psutil>=5.9.0",
 ]
+keywords = [
+    "kv-cache",
+    "llm",
+    "transformers",
+    "attention",
+    "quantization",
+    "avx2",
+    "inference",
+    "memory-optimization",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+benchmark = [
+    "accelerate>=0.26.0",
+    "datasets>=2.16.0",
+    "sentencepiece>=0.1.99",
+    "matplotlib>=3.7.0",
+    "pandas>=2.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "build>=1.0.0",
+    "twine>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/RahulGPi/TriTierCache"
+Repository = "https://github.com/RahulGPi/TriTierCache"
+Issues = "https://github.com/RahulGPi/TriTierCache/issues"
 
 [project.scripts]
-idk-what-to-name-this = "tri_tier.cli:main"
-
-[dependency-groups]
-dev = [
-    "huggingface-hub>=1.29.0",
-    "pytest>=9.1.1",
-]
+tri-tier = "tri_tier.cli:main"
+tritier = "tri_tier.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

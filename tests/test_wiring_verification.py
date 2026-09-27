@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import torch
 import tri_tier._C as _C
-from src.tri_tier.cache import TriTierCache
+from tri_tier.cache import TriTierCache
 
 
 def test_k_group_size_wiring_synthetic():

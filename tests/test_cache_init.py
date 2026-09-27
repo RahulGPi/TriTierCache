@@ -12,8 +12,8 @@ import math
 import torch
 import pytest
 
-from src.tri_tier.cache import TriTierCache
-from src.tri_tier.constants import CHUNK_SIZE
+from tri_tier.cache import TriTierCache
+from tri_tier.constants import CHUNK_SIZE
 
 # Deliberately "ugly" numbers so ceiling/rounding behavior gets exercised
 # instead of hidden by convenient round numbers.

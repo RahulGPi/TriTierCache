@@ -83,31 +83,36 @@ def is_avx2_supported() -> bool:
     return False
 
 
+import warnings
+
 # ---------------------------------------------------------------------------
 # Safety Gate: Validate AVX2 CPU compatibility before importing C++ extension
 # ---------------------------------------------------------------------------
 _disable_avx2_check = os.environ.get("TRI_TIER_DISABLE_AVX2_CHECK", "0") == "1"
+avx2_available = is_avx2_supported() or _disable_avx2_check
 
-if not is_avx2_supported() and not _disable_avx2_check:
-    raise RuntimeError(
-        f"TriTier requires an x86_64 CPU supporting the AVX2 instruction set. "
-        f"The host CPU architecture '{platform.machine()}' on '{platform.system()}' "
-        f"does not support AVX2 instructions. Execution halted to prevent low-level crashes."
+if not avx2_available:
+    warnings.warn(
+        f"TriTier: AVX2 instructions are not detected on host CPU '{platform.machine()}' on '{platform.system()}'. "
+        "TriTier will operate in pure PyTorch reference mode without AVX2 C++ acceleration.",
+        UserWarning,
+        stacklevel=2,
     )
+    _C = None
+    HAS_CPP_EXT = False
+else:
+    try:
+        from tri_tier import _C
+        HAS_CPP_EXT = True
+    except ImportError:
+        _C = None  # type: ignore[assignment]
+        HAS_CPP_EXT = False
 
 # ---------------------------------------------------------------------------
 # Top-level Public Interface
 # ---------------------------------------------------------------------------
 from tri_tier.cache import TriTierCache
 from tri_tier.constants import CHUNK_SIZE, DEVICE, SINK_SIZE, UPDATE_THRESHOLD
-
-try:
-    from tri_tier import _C
-
-    HAS_CPP_EXT = True
-except ImportError:
-    _C = None  # type: ignore[assignment]
-    HAS_CPP_EXT = False
 
 __version__ = "0.1.0"
 
