@@ -51,7 +51,7 @@ If the extension is not compiled, the package falls back to a pure PyTorch refer
 
 ## Results summary
 
-TriTierCache delivers up to **7.1x memory reduction** and **2.81x faster decode attention** while maintaining >90% downstream task retention and zero loss on needle-in-a-haystack retrieval across long contexts.
+TriTierCache delivers up to **6.3x memory reduction** and **2.81x faster decode attention** while maintaining >90% downstream task retention and zero loss on needle-in-a-haystack retrieval across long contexts.
 
 <div align="center">
 
