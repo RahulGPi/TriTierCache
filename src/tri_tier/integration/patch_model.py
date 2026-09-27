@@ -38,8 +38,8 @@ def _reference_attention_path(self, cache: TriTierCache, Q: torch.Tensor, num_q_
         K_full = K_full.repeat_interleave(repeat_factor, dim=1)
         V_full = V_full.repeat_interleave(repeat_factor, dim=1)
 
-    K_full = K_full.transpose(0, 1).unsqueeze(0)   # [total_kv, heads, dim] -> [1, heads, total_kv, dim]
-    V_full = V_full.transpose(0, 1).unsqueeze(0)
+    K_full = K_full.transpose(0, 1).unsqueeze(0).to(dtype=Q.dtype)   # [total_kv, heads, dim] -> [1, heads, total_kv, dim]
+    V_full = V_full.transpose(0, 1).unsqueeze(0).to(dtype=Q.dtype)
 
     scaling = getattr(self, "scaling", None) or (head_dim ** -0.5)
     attn_scores = torch.matmul(Q, K_full.transpose(-2, -1)) * scaling
@@ -87,10 +87,20 @@ def patched_forward(self,
         )
     cache = self.tri_tier_cache
 
-    # ---- Part 2: project and rotate ----
-    Q = self.q_proj(hidden_states).view(bsz, q_len, num_q_heads, head_dim).transpose(1, 2)
-    K_new = self.k_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim).transpose(1, 2)
-    V_new = self.v_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim).transpose(1, 2)
+    # ---- Part 2: project, normalize (Qwen3), and rotate ----
+    q_proj = self.q_proj(hidden_states).view(bsz, q_len, num_q_heads, head_dim)
+    k_proj = self.k_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim)
+    v_proj = self.v_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim)
+
+    # Q-K Normalization (e.g. Qwen3 per-head RMSNorm)
+    if hasattr(self, "q_norm") and self.q_norm is not None:
+        q_proj = self.q_norm(q_proj)
+    if hasattr(self, "k_norm") and self.k_norm is not None:
+        k_proj = self.k_norm(k_proj)
+
+    Q = q_proj.transpose(1, 2)
+    K_new = k_proj.transpose(1, 2)
+    V_new = v_proj.transpose(1, 2)
 
     # Rotary position embedding application
     cos, sin = position_embeddings
@@ -100,6 +110,10 @@ def patched_forward(self,
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
+
+    if cos.ndim == 3:
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
 
     Q = (Q * cos) + (_rotate_half(Q) * sin)
     K_new = (K_new * cos) + (_rotate_half(K_new) * sin)
@@ -126,7 +140,7 @@ def patched_forward(self,
             pos = self.capture_needle_pos
             self.captured_needle_k = K_tokens[pos].clone()
             self.captured_needle_v = V_tokens[pos].clone()
-        cache.prefill(K_tokens, V_tokens)
+        cache.prefill(K_tokens.float(), V_tokens.float())
 
         context_layer = context_layer.transpose(1, 2).reshape(bsz, q_len, -1)
         final_output = self.o_proj(context_layer)
@@ -134,23 +148,23 @@ def patched_forward(self,
 
     # ---- Case B: Single-token Decode Step (q_len == 1) ----
     if cache._engine is not None and not need_full_weights:
-        Q_flat = Q.reshape(num_q_heads * head_dim).contiguous()
-        K_flat = K_new.reshape(num_kv_heads * head_dim).contiguous()
-        V_flat = V_new.reshape(num_kv_heads * head_dim).contiguous()
+        Q_flat = Q.reshape(num_q_heads * head_dim).contiguous().float()
+        K_flat = K_new.reshape(num_kv_heads * head_dim).contiguous().float()
+        V_flat = V_new.reshape(num_kv_heads * head_dim).contiguous().float()
 
         attn_output = torch.empty((num_q_heads * head_dim,), dtype=torch.float32, device="cpu")
 
         cache.step(Q_flat, K_flat, V_flat, attn_output)
 
-        context_layer = attn_output.view(bsz, q_len, -1)
+        context_layer = attn_output.view(bsz, q_len, -1).to(dtype=hidden_states.dtype)
         final_output = self.o_proj(context_layer)
         return final_output, None
     else:
-        K_new_flat = K_new.squeeze(0).squeeze(1)
-        V_new_flat = V_new.squeeze(0).squeeze(1)
+        K_new_flat = K_new.squeeze(0).squeeze(1).float()
+        V_new_flat = V_new.squeeze(0).squeeze(1).float()
         cache.ingest_token(K_new_flat, V_new_flat)
         context_layer, attn_weights = _reference_attention_path(self, cache, Q, num_q_heads, num_kv_heads, head_dim)
-        context_layer = context_layer.transpose(1, 2).reshape(bsz, q_len, -1)
+        context_layer = context_layer.transpose(1, 2).reshape(bsz, q_len, -1).to(dtype=hidden_states.dtype)
         final_output = self.o_proj(context_layer)
         return final_output, attn_weights
 
