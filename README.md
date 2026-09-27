@@ -55,7 +55,9 @@ TriTierCache delivers up to **7.1x memory reduction** and **2.81x faster decode 
 
 <div align="center">
 
-<img src="benchmarks_kv_memory.svg" alt="KV Cache Memory Footprint Comparison: Vanilla Baseline vs. TriTierCache across Context Lengths" width="850"/>
+<a href="benchmarks_kv_memory.svg">
+  <img src="benchmarks_kv_memory.svg" alt="KV Cache Memory Footprint Comparison: Vanilla Baseline vs. TriTierCache across Context Lengths" width="850"/>
+</a>
 
 </div>
 

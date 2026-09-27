@@ -1,5 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 740" width="100%" height="100%" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
-
   <defs>
     <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
       <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0F172A" flood-opacity="0.3"/>
@@ -8,7 +8,7 @@
       <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0F172A" flood-opacity="0.45"/>
     </filter>
   </defs>
-  <style>
+  <style type="text/css"><![CDATA[
     /* Global styles */
     .bg { fill: #FFFFFF; }
     .plot-bg { fill: #F8FAFC; stroke: #94A3B8; stroke-width: 1; }
@@ -31,7 +31,7 @@
     .ctx-col:hover .ctx-hover-tab { opacity: 1; }
     .ctx-col:hover .ctx-tooltip { opacity: 1; transform: translateY(0); }
     
-    /* Interactive Point Tooltips & Animations */
+    /* Interactive Point Tooltips and Animations */
     .point-marker { transition: transform 0.15s ease, r 0.15s ease; cursor: pointer; }
     .point-marker:hover { transform: scale(1.4); }
     
@@ -39,8 +39,7 @@
     .legend-box { fill: #FFFFFF; stroke: #CBD5E1; stroke-width: 1; rx: 6; }
     .legend-title { font-size: 10.5px; font-weight: bold; fill: #0F172A; }
     .legend-text { font-size: 9.5px; font-weight: 500; fill: #334155; }
-  </style>
-
+  ]]></style>
   <rect width="1180" height="740" class="bg"/>
   <rect x="95" y="70" width="855" height="595" class="plot-bg"/>
   <line x1="95" y1="639.70" x2="950" y2="639.70" class="grid-line"/>
