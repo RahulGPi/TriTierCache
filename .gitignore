@@ -72,3 +72,7 @@ core
 # Data and Benchmark Reports
 *.csv
 benchmarks/results/*.csv
+
+# Generated Benchmark Assets & Scripts
+*.png
+benchmarks/generate_memory_graph.py

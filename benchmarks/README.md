@@ -183,6 +183,12 @@ Evaluated on `meta-llama/Llama-3.2-1B` over 1024 evaluation tokens on non-repeat
 
 ## 5. Memory RSS & Physical Compression Ratios
 
+<div align="center">
+
+<img src="../benchmarks_kv_memory.svg" alt="KV Cache Memory Footprint Comparison: Vanilla Baseline vs. TriTierCache across Context Lengths" width="850"/>
+
+</div>
+
 Physical memory allocation measured after AVX2 kernel dynamic rewiring on `meta-llama/Llama-3.2-1B`:
 
 | Context Length | Vanilla FP16 (MB) | Vanilla FP32 (MB) | TriTier Cache (MB) | Sink Bytes | RW Bytes | HH Bytes | PBS Payload Bytes | PBS Metadata Bytes | Compression vs FP16 | Compression vs FP32 |

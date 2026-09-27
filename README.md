@@ -8,7 +8,7 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Transformers](https://img.shields.io/badge/Transformers-LLaMA%20%7C%20SmolLM-yellow.svg)](https://github.com/huggingface/transformers)
 [![SIMD](https://img.shields.io/badge/SIMD-AVX2%20%7C%20FMA%20%7C%20BMI2%20%7C%20OpenMP-0071C5.svg)](https://www.intel.com/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
 
@@ -51,6 +51,12 @@ If the extension is not compiled, the package falls back to a pure PyTorch refer
 ## Results summary
 
 TriTierCache delivers up to **7.1x memory reduction** and **2.81x faster decode attention** while maintaining >90% downstream task retention and zero loss on needle-in-a-haystack retrieval across long contexts.
+
+<div align="center">
+
+<img src="benchmarks_kv_memory.svg" alt="KV Cache Memory Footprint Comparison: Vanilla Baseline vs. TriTierCache across Context Lengths" width="850"/>
+
+</div>
 
 | Metric | Vanilla Baseline (FP32) | TriTierCache | Impact / Speedup |
 | :--- | :--- | :--- | :--- |
@@ -221,7 +227,7 @@ Architectural patch and integration layer details are documented in [`src/README
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
